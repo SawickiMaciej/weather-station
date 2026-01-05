@@ -15,24 +15,29 @@ export default function Home() {
   const [loading, setLoading] = useState(true);
 
   // 2. Funkcja pobierająca dane
-  useEffect(() => {
+ useEffect(() => {
     async function fetchData() {
       // Pobierz ostatnie 24 pomiary dla stacji testowej
       const { data: measurements, error } = await supabase
         .from('measurements')
         .select('*')
-        .eq('station_id', 'test-001') // Tutaj szukamy naszej stacji
-        .order('created_at', { ascending: true }) // Od najstarszych do najnowszych (do wykresu)
+        .eq('station_id', 'test-002')
+        .order('created_at', { ascending: false }) // <--- ZMIANA 1: Najpierw najnowsze!
         .limit(24);
 
-      if (error) console.error('Błąd pobierania:', error);
-      else setData(measurements || []);
+      if (error) {
+        console.error('Błąd pobierania:', error);
+      } else {
+        // <--- ZMIANA 2: Odwracamy tablicę, żeby na wykresie czas szedł w prawo (od najstarszego z pobranych do najnowszego)
+        const reversedData = (measurements || []).reverse();
+        setData(reversedData);
+      }
       
       setLoading(false);
     }
 
     fetchData();
-    // Odświeżaj co minutę (opcjonalne)
+    // Odświeżanie co minutę
     const interval = setInterval(fetchData, 60000);
     return () => clearInterval(interval);
   }, []);
