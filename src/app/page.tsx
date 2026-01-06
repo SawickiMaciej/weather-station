@@ -316,7 +316,7 @@ export default function Dashboard() {
                     contentStyle={{ backgroundColor: "#0f172a", borderColor: "#334155", color: "#f8fafc" }}
                     itemStyle={{ color: "#3b82f6" }}
                     labelFormatter={formatTooltipDate} // <--- TU POPRAWILIŚMY FORMAT DATY
-                    formatter={(value: number) => [`${value.toFixed(1)}°C`, "Temperatura"]}
+                    formatter={(value: any) => [`${Number(value).toFixed(1)}°C`, "Temperatura"]}
                   />
                   <Area
                     type="monotone"
@@ -354,7 +354,7 @@ export default function Dashboard() {
                     contentStyle={{ backgroundColor: "#0f172a", borderColor: "#334155", color: "#f8fafc" }}
                     itemStyle={{ color: "#22c55e" }}
                     labelFormatter={formatTooltipDate} // <--- TU TEŻ
-                    formatter={(value: number) => [`${value.toFixed(0)}%`, "Wilgotność"]}
+                    formatter={(value: any) => [`${Number(value).toFixed(0)}%`, "Wilgotność"]}
                   />
                   <Line
                     type="monotone"
