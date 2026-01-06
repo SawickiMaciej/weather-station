@@ -22,7 +22,9 @@ import {
   WifiOff,
   ArrowDown,
   ArrowUp,
-  Clock
+  Clock,
+  Battery, // <--- DODAŁEM IMPORT
+  Signal   // <--- DODAŁEM IMPORT
 } from "lucide-react";
 
 // --- KONFIGURACJA SUPABASE ---
@@ -35,13 +37,13 @@ type Measurement = {
   created_at: string;
   temperature: number;
   humidity: number;
+  battery_voltage: number;
   station_id: string;
 };
 
 type Station = {
   id: string; 
   name: string;
-
 };
 
 // --- OPCJE ZAKRESU CZASU ---
@@ -58,33 +60,28 @@ export default function Dashboard() {
   const [selectedStationId, setSelectedStationId] = useState<string>("");
   const [loading, setLoading] = useState(true);
   
-  // Nowy stan: wybrany zakres czasu (domyślnie 24h)
   const [selectedRange, setSelectedRange] = useState(24);
 
-// --- 1. POBIERANIE LISTY STACJI ---
+  // --- 1. POBIERANIE LISTY STACJI ---
   useEffect(() => {
     const fetchStations = async () => {
       const { data: stationsData } = await supabase.from("stations").select("*");
       if (stationsData && stationsData.length > 0) {
         setStations(stationsData);
-        // ZMIANA PONIŻEJ: używamy .id zamiast .station_id
         if (!selectedStationId) setSelectedStationId(stationsData[0].id);
       }
     };
     fetchStations();
   }, []);
 
-// --- 2. POBIERANIE POMIARÓW ---
+  // --- 2. POBIERANIE POMIARÓW ---
   useEffect(() => {
-    // Jeśli nie ma wybranej stacji, nie rób nic
     if (!selectedStationId) return;
 
     const fetchData = async () => {
       setLoading(true);
-      // Opcjonalnie: czyścimy wykres na moment przełączania, żeby było widać, że coś się dzieje
       setData([]); 
-
-      console.log("Pobieram dane dla:", selectedStationId); // <-- Logowanie dla pewności
+      console.log("Pobieram dane dla:", selectedStationId);
 
       const startDate = new Date();
       startDate.setHours(startDate.getHours() - selectedRange);
@@ -92,7 +89,7 @@ export default function Dashboard() {
       const { data: measurements, error } = await supabase
         .from("measurements")
         .select("*")
-        .eq("station_id", selectedStationId) // Filtrowanie po ID
+        .eq("station_id", selectedStationId)
         .gte("created_at", startDate.toISOString())
         .order("created_at", { ascending: true });
 
@@ -107,20 +104,16 @@ export default function Dashboard() {
 
     fetchData();
 
-    // --- REALTIME FIX ---
-    // Zmieniamy nazwę kanału na unikalną dla stacji (np. 'live-test-002')
-    // Dzięki temu Supabase nie pomyli kanałów przy szybkim przełączaniu.
     const channelName = `live-${selectedStationId}`; 
-    
     const channel = supabase
-      .channel(channelName) // <--- TU BYŁA ZMIANA
+      .channel(channelName)
       .on(
         "postgres_changes",
         { 
           event: "INSERT", 
           schema: "public", 
           table: "measurements",
-          filter: `station_id=eq.${selectedStationId}` // Dodatkowe zabezpieczenie filtra
+          filter: `station_id=eq.${selectedStationId}`
         },
         (payload) => {
           console.log("Nowy pomiar live!", payload.new);
@@ -129,7 +122,6 @@ export default function Dashboard() {
       )
       .subscribe();
 
-    // Sprzątanie przy zmianie stacji
     return () => {
       console.log("Odłączam kanał:", channelName);
       supabase.removeChannel(channel);
@@ -137,8 +129,6 @@ export default function Dashboard() {
   }, [selectedStationId, selectedRange]);
 
   // --- POMOCNICZE FUNKCJE ---
-
-  // Formatowanie daty do dymka na wykresie (krótsze!)
   const formatTooltipDate = (isoString: string) => {
     const date = new Date(isoString);
     return date.toLocaleString("pl-PL", {
@@ -149,23 +139,30 @@ export default function Dashboard() {
     });
   };
 
-  // Formatowanie osi X (tylko godzina)
   const formatAxisDate = (isoString: string) => {
     return new Date(isoString).toLocaleTimeString("pl-PL", { hour: "2-digit", minute: "2-digit" });
   };
 
-  // Obliczenia statystyk
   const last = data.length > 0 ? data[data.length - 1] : null;
   
-  // Sprawdzenie czy OFFLINE (czy ostatni pomiar jest starszy niż 30 min)
   const isOffline = last 
     ? (new Date().getTime() - new Date(last.created_at).getTime()) > 30 * 60 * 1000
     : true;
 
-  // Min / Max w wybranym okresie
   const temperatures = data.map(d => d.temperature);
   const minTemp = temperatures.length ? Math.min(...temperatures) : null;
   const maxTemp = temperatures.length ? Math.max(...temperatures) : null;
+
+  // --- WKLEJ TO TUTAJ (przed return) ---
+  const getBatteryStatus = (voltage: number | undefined) => {
+    if (!voltage) return "text-slate-500"; 
+    if (voltage > 3.9) return "text-green-400"; // Full
+    if (voltage > 3.5) return "text-blue-400";  // OK
+    if (voltage > 3.3) return "text-yellow-400"; // Ostrzeżenie
+    return "text-red-500 animate-pulse font-bold"; // Krytyczny
+  };
+  // -------------------------------------
+
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-200 p-4 md:p-8 font-sans">
@@ -183,8 +180,21 @@ export default function Dashboard() {
             </p>
           </div>
 
-          <div className="flex flex-col sm:flex-row gap-3 w-full md:w-auto">
+          <div className="flex flex-col sm:flex-row gap-3 w-full md:w-auto items-center">
             
+            {/* --- NOWA SEKCJA: BATERIA I WIFI --- */}
+            {/* --- TUTAJ WKLEJ NOWĄ SEKCJĘ BATERII --- */}
+            <div className="flex items-center gap-4 mr-2">
+              <div className={`flex items-center gap-2 text-sm transition-colors duration-500 ${getBatteryStatus(last?.battery_voltage)}`}>
+                <Battery className="w-4 h-4" />
+                {last?.battery_voltage ? `${last.battery_voltage.toFixed(2)}V` : "--"}
+              </div>
+              <div className="hidden sm:flex items-center gap-2 text-sm text-slate-400">
+                <Signal className="w-4 h-4" />
+              </div>
+            </div>
+            {/* --------------------------------------- */}
+
             {/* Wybór stacji */}
             <div className="flex items-center bg-slate-900 border border-slate-800 rounded-lg px-3 py-2">
               <MapPin className="w-4 h-4 text-slate-400 mr-2" />
@@ -198,7 +208,6 @@ export default function Dashboard() {
                   <option>Ładowanie stacji...</option>
                 ) : (
                   stations.map((s) => (
-                    // ZMIANA PONIŻEJ: value={s.id} zamiast s.station_id
                     <option key={s.id} value={s.id}>
                       {s.name}
                     </option>
@@ -315,7 +324,7 @@ export default function Dashboard() {
                   <Tooltip
                     contentStyle={{ backgroundColor: "#0f172a", borderColor: "#334155", color: "#f8fafc" }}
                     itemStyle={{ color: "#3b82f6" }}
-                    labelFormatter={formatTooltipDate} // <--- TU POPRAWILIŚMY FORMAT DATY
+                    labelFormatter={formatTooltipDate}
                     formatter={(value: any) => [`${Number(value).toFixed(1)}°C`, "Temperatura"]}
                   />
                   <Area
@@ -353,7 +362,7 @@ export default function Dashboard() {
                   <Tooltip
                     contentStyle={{ backgroundColor: "#0f172a", borderColor: "#334155", color: "#f8fafc" }}
                     itemStyle={{ color: "#22c55e" }}
-                    labelFormatter={formatTooltipDate} // <--- TU TEŻ
+                    labelFormatter={formatTooltipDate}
                     formatter={(value: any) => [`${Number(value).toFixed(0)}%`, "Wilgotność"]}
                   />
                   <Line
