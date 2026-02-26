@@ -1,19 +1,19 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { createClient } from "@supabase/supabase-js";
+import { createBrowserClient } from "@supabase/ssr";
 import {
   AreaChart, Area, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
 } from "recharts";
 import {
   Thermometer, Droplets, MapPin, CalendarClock, AlertTriangle, WifiOff,
-  ArrowDown, ArrowUp, Battery, Signal, Snowflake, Leaf, Activity
+  ArrowDown, ArrowUp, Battery, Signal, Snowflake, Leaf, Activity, SlidersHorizontal
 } from "lucide-react";
 
 // --- KONFIGURACJA SUPABASE ---
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
 const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
-const supabase = createClient(supabaseUrl, supabaseAnonKey);
+const supabase = createBrowserClient(supabaseUrl, supabaseAnonKey);
 
 // --- TYPY DANYCH ---
 type Measurement = {
@@ -21,16 +21,17 @@ type Measurement = {
   temperature: number;
   humidity: number;
   battery_voltage: number;
-  signal_strength: number; // <--- DODANY SYGNAŁ
+  signal_strength: number;
   station_id: string;
 };
 
 type Station = {
   id: string; 
   name: string;
+  // Dodajemy nasz nowy JSON z ustawień!
+  sensors_config?: Record<string, { name: string; offset: number }>;
 };
 
-// --- OPCJE ZAKRESU CZASU ---
 const TIME_RANGES = [
   { label: "12h", hours: 12 },
   { label: "24h", hours: 24 },
@@ -39,13 +40,13 @@ const TIME_RANGES = [
 ];
 
 export default function Dashboard() {
-  const [data, setData] = useState<Measurement[]>([]);
+  const [data, setData] = useState<Measurement[]>([]); // Tu trzymamy surowe dane
   const [stations, setStations] = useState<Station[]>([]);
   const [selectedStationId, setSelectedStationId] = useState<string>("");
   const [loading, setLoading] = useState(true);
   const [selectedRange, setSelectedRange] = useState(24);
 
-  // --- 1. POBIERANIE LISTY STACJI ---
+  // --- 1. POBIERANIE LISTY STACJI (z konfiguracją JSON) ---
   useEffect(() => {
     const fetchStations = async () => {
       const { data: stationsData } = await supabase.from("stations").select("*");
@@ -55,7 +56,7 @@ export default function Dashboard() {
       }
     };
     fetchStations();
-  }, []);
+  }, [selectedStationId]);
 
   // --- 2. POBIERANIE POMIARÓW ---
   useEffect(() => {
@@ -93,16 +94,33 @@ export default function Dashboard() {
     return () => { supabase.removeChannel(channel); };
   }, [selectedStationId, selectedRange]);
 
-  // --- FUNKCJE FORMATUJĄCE (AGROMETEOROLOGIA) ---
+  // --- 3. MAGIA KALIBRACJI (Przeliczanie w locie) ---
+  const currentStation = stations.find(s => s.id === selectedStationId);
+  const tempOffset = currentStation?.sensors_config?.temp_air?.offset || 0;
+  const humOffset = currentStation?.sensors_config?.humidity?.offset || 0;
+
+  // Tworzymy nową tablicę ze skalibrowanymi wartościami, gotową do wyświetlenia
+  const calibratedData = data.map(d => ({
+    ...d,
+    raw_temperature: d.temperature, // Zostawiamy w razie W
+    raw_humidity: d.humidity,
+    // Aplikujemy offsety z bazy:
+    temperature: d.temperature + tempOffset,
+    // Zabezpieczenie: wilgotność nie może wyjść poza 0-100%
+    humidity: Math.max(0, Math.min(100, d.humidity + humOffset)), 
+  }));
+
+  // --- FUNKCJE FORMATUJĄCE ---
   const formatAxisDate = (isoString: string) => new Date(isoString).toLocaleTimeString("pl-PL", { hour: "2-digit", minute: "2-digit" });
   
-  const last = data.length > 0 ? data[data.length - 1] : null;
+  // Używamy ZAWSZE zaktualizowanych danych (calibratedData) do statystyk!
+  const last = calibratedData.length > 0 ? calibratedData[calibratedData.length - 1] : null;
   const isOffline = last ? (new Date().getTime() - new Date(last.created_at).getTime()) > 30 * 60 * 1000 : true;
 
-  const minTemp = data.length ? Math.min(...data.map(d => d.temperature)) : null;
-  const maxTemp = data.length ? Math.max(...data.map(d => d.temperature)) : null;
+  const minTemp = calibratedData.length ? Math.min(...calibratedData.map(d => d.temperature)) : null;
+  const maxTemp = calibratedData.length ? Math.max(...calibratedData.map(d => d.temperature)) : null;
 
-  // --- FUNKCJE BATERII I ZASIĘGU ---
+  // --- BATERIA I ZASIĘG ---
   const getBatteryPercentage = (voltage: number | undefined) => {
     if (!voltage) return "--";
     const percentage = ((voltage - 3.2) / (4.2 - 3.2)) * 100;
@@ -146,7 +164,6 @@ export default function Dashboard() {
           </div>
 
           <div className="flex flex-col sm:flex-row gap-3 w-full md:w-auto items-center">
-            {/* Wybór stacji */}
             <div className="flex items-center bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 shadow-sm">
               <MapPin className="w-5 h-5 text-emerald-500 mr-2" />
               <select
@@ -161,7 +178,6 @@ export default function Dashboard() {
               </select>
             </div>
 
-            {/* Wybór zakresu czasu */}
             <div className="flex bg-slate-900 border border-slate-800 rounded-lg p-1">
               {TIME_RANGES.map((range) => (
                 <button
@@ -178,7 +194,6 @@ export default function Dashboard() {
           </div>
         </div>
 
-        {/* --- ALERT OFFLINE --- */}
         {isOffline && data.length > 0 && (
           <div className="bg-red-500/10 border border-red-500/50 text-red-400 p-4 rounded-xl flex items-center gap-3 animate-pulse">
             <WifiOff className="w-6 h-6" />
@@ -189,12 +204,11 @@ export default function Dashboard() {
           </div>
         )}
 
-        {/* --- KAFELKI KPI (3 KOLUMNY) --- */}
+        {/* --- KAFELKI KPI --- */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
           
-          {/* 1. Temperatura & Przymrozki */}
+          {/* Temperatura */}
           <div className={`p-6 rounded-xl border relative overflow-hidden transition-colors ${isFrostWarning ? 'bg-blue-950/40 border-blue-800' : 'bg-slate-900 border-slate-800'}`}>
-            {isFrostWarning && <div className="absolute top-0 left-0 w-full h-1 bg-blue-500 animate-pulse" />}
             <div className="flex justify-between items-start mb-4">
               <div className="flex items-center gap-2">
                 <Thermometer className={`w-5 h-5 ${isFrostWarning ? 'text-blue-400' : 'text-orange-500'}`} />
@@ -208,14 +222,22 @@ export default function Dashboard() {
             <div className={`text-5xl font-bold mb-2 ${isFrostWarning ? 'text-blue-100' : 'text-white'}`}>
               {last ? `${last.temperature.toFixed(1)}°C` : "--"}
             </div>
-            <div className={`text-sm flex items-center gap-2 ${isFrostWarning ? 'text-blue-400 font-medium' : 'text-slate-500'}`}>
-              {isFrostWarning ? <><Snowflake className="w-4 h-4"/> Uwaga! Ryzyko przymrozku</> : "Warunki optymalne"}
+            
+            {/* Wskaźnik kalibracji */}
+            <div className="flex items-center justify-between mt-2">
+              <div className={`text-sm flex items-center gap-2 ${isFrostWarning ? 'text-blue-400 font-medium' : 'text-slate-500'}`}>
+                {isFrostWarning ? <><Snowflake className="w-4 h-4"/> Uwaga! Ryzyko przymrozku</> : "Warunki optymalne"}
+              </div>
+              {tempOffset !== 0 && (
+                <div className="text-xs text-slate-500 bg-slate-950 px-2 py-1 rounded flex items-center gap-1 border border-slate-800" title={`Odczyt surowy: ${last?.raw_temperature.toFixed(1)}°C`}>
+                  <SlidersHorizontal className="w-3 h-3" /> Korekta {tempOffset > 0 ? `+${tempOffset}` : tempOffset}°C
+                </div>
+              )}
             </div>
           </div>
 
-          {/* 2. Wilgotność & Choroby */}
+          {/* Wilgotność */}
           <div className={`p-6 rounded-xl border relative overflow-hidden transition-colors ${isFungusWarning ? 'bg-emerald-950/40 border-emerald-800' : 'bg-slate-900 border-slate-800'}`}>
-            {isFungusWarning && <div className="absolute top-0 left-0 w-full h-1 bg-emerald-500 animate-pulse" />}
             <div className="flex items-center gap-2 mb-4">
               <Droplets className="w-5 h-5 text-sky-500" />
               <span className="text-slate-400 text-xs uppercase tracking-wider font-semibold">Wilgotność Względna</span>
@@ -223,18 +245,25 @@ export default function Dashboard() {
             <div className="text-5xl font-bold text-white mb-2">
               {last ? `${last.humidity.toFixed(0)}%` : "--"}
             </div>
-            <div className={`text-sm flex items-center gap-2 ${isFungusWarning ? 'text-emerald-400 font-medium' : 'text-slate-500'}`}>
-              {isFungusWarning ? <><AlertTriangle className="w-4 h-4"/> Wysokie ryzyko infekcji grzybowej</> : "Brak zagrożeń wilgotnościowych"}
+            
+            <div className="flex items-center justify-between mt-2">
+              <div className={`text-sm flex items-center gap-2 ${isFungusWarning ? 'text-emerald-400 font-medium' : 'text-slate-500'}`}>
+                {isFungusWarning ? <><AlertTriangle className="w-4 h-4"/> Wysokie ryzyko infekcji grzybowej</> : "Brak zagrożeń"}
+              </div>
+              {humOffset !== 0 && (
+                <div className="text-xs text-slate-500 bg-slate-950 px-2 py-1 rounded flex items-center gap-1 border border-slate-800" title={`Odczyt surowy: ${last?.raw_humidity.toFixed(0)}%`}>
+                  <SlidersHorizontal className="w-3 h-3" /> Korekta {humOffset > 0 ? `+${humOffset}` : humOffset}%
+                </div>
+              )}
             </div>
           </div>
 
-          {/* 3. Status Sprzętu (Bateria i Zasięg) */}
+          {/* Diagnostyka (Bateria i Sygnał) - Bez zmian */}
           <div className="p-6 rounded-xl border bg-slate-900 border-slate-800 flex flex-col justify-between">
              <div className="flex items-center gap-2 mb-4">
               <Activity className="w-5 h-5 text-slate-400" />
               <span className="text-slate-400 text-xs uppercase tracking-wider font-semibold">Diagnostyka Urządzenia</span>
             </div>
-            
             <div className="space-y-4">
               <div className="flex justify-between items-center bg-slate-950 p-3 rounded-lg border border-slate-800/50">
                 <div className="flex items-center gap-3">
@@ -246,7 +275,6 @@ export default function Dashboard() {
                   <div className="text-xs text-slate-500">{last?.battery_voltage ? `${last.battery_voltage.toFixed(2)} V` : "--"}</div>
                 </div>
               </div>
-
               <div className="flex justify-between items-center bg-slate-950 p-3 rounded-lg border border-slate-800/50">
                 <div className="flex items-center gap-3">
                   <Signal className={`w-6 h-6 ${getSignalInfo(last?.signal_strength).color}`} />
@@ -261,16 +289,16 @@ export default function Dashboard() {
           </div>
         </div>
 
-        {/* --- WYKRESY (TUTAJ BEZ ZMIAN WZGLĘDEM POPRZEDNIEGO KODU - zostają eleganckie) --- */}
+        {/* --- WYKRESY (Zasilone skalibrowanymi danymi!) --- */}
         <div className="grid lg:grid-cols-2 gap-6 mt-6">
-          {/* Wykres Temperatury */}
           <div className="bg-slate-900 p-5 rounded-xl border border-slate-800">
             <h3 className="text-sm font-medium text-slate-400 mb-6 flex justify-between">
               <span>Historia Temperatury</span>
             </h3>
             <div className="h-64 w-full">
               <ResponsiveContainer width="100%" height="100%">
-                <AreaChart data={data}>
+                {/* TUTAJ WCHODZĄ PRZELICZONE DANE: data={calibratedData} */}
+                <AreaChart data={calibratedData}>
                   <defs>
                     <linearGradient id="gradTemp" x1="0" y1="0" x2="0" y2="1">
                       <stop offset="5%" stopColor="#f97316" stopOpacity={0.3} />
@@ -287,14 +315,14 @@ export default function Dashboard() {
             </div>
           </div>
 
-          {/* Wykres Wilgotności */}
           <div className="bg-slate-900 p-5 rounded-xl border border-slate-800">
             <h3 className="text-sm font-medium text-slate-400 mb-6 flex justify-between">
               <span>Historia Wilgotności</span>
             </h3>
             <div className="h-64 w-full">
               <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={data}>
+                {/* TUTAJ WCHODZĄ PRZELICZONE DANE: data={calibratedData} */}
+                <LineChart data={calibratedData}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" vertical={false} />
                   <XAxis dataKey="created_at" tickFormatter={formatAxisDate} stroke="#475569" fontSize={11} minTickGap={30} />
                   <YAxis stroke="#475569" fontSize={11} domain={[0, 100]} width={35} />
