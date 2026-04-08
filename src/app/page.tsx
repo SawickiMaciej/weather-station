@@ -122,7 +122,7 @@ export default function Dashboard() {
         .order("created_at", { ascending: true });
 
       if (!error) {
-        setRainData(data || []);
+        setRainData((data as any) || []);
       }
     };
 
@@ -479,7 +479,7 @@ export default function Dashboard() {
                 <Tooltip 
                   contentStyle={{ backgroundColor: "#0f172a", borderColor: "#334155" }} 
                   itemStyle={{ color: "#06b6d4" }}
-                  formatter={(value: number) => [`${value.toFixed(2)} mm`, "Opad"]}
+                  formatter={(value: any) => [`${Number(value).toFixed(2)} mm`, "Opad"]}
                   labelFormatter={(label) => `Data: ${label}`}
                   cursor={{ fill: '#1e293b' }} 
                 />
