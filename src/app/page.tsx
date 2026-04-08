@@ -3,11 +3,12 @@
 import { useEffect, useState } from "react";
 import { createBrowserClient } from "@supabase/ssr";
 import {
-  AreaChart, Area, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
+  AreaChart, Area, LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
 } from "recharts";
 import {
   Thermometer, Droplets, MapPin, CalendarClock, AlertTriangle, WifiOff,
-  ArrowDown, ArrowUp, Battery, Signal, Snowflake, Leaf, Activity, SlidersHorizontal
+  ArrowDown, ArrowUp, Battery, Signal, Snowflake, Leaf, Activity, SlidersHorizontal,
+  Droplet, Cloud, Zap, TrendingDown
 } from "lucide-react";
 
 // --- KONFIGURACJA SUPABASE ---
@@ -16,6 +17,13 @@ const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
 const supabase = createBrowserClient(supabaseUrl, supabaseAnonKey);
 
 // --- TYPY DANYCH ---
+type ExtraData = {
+  soil_moisture?: string | number;
+  soil_temperature?: string | number;
+  rain_intensity?: string | number; // ZMIENIONA NAZWA - to jest kumulacyjny rain gauge!
+  [key: string]: any;
+};
+
 type Measurement = {
   created_at: string;
   temperature: number;
@@ -23,30 +31,36 @@ type Measurement = {
   battery_voltage: number;
   signal_strength: number;
   station_id: string;
+  extra_data?: ExtraData;
 };
 
 type Station = {
   id: string; 
   name: string;
-  // Dodajemy nasz nowy JSON z ustawień!
   sensors_config?: Record<string, { name: string; offset: number }>;
+  rain_gauge_baseline?: number; // Kumulacyjna wartość z ostatniego resetu
 };
 
 const TIME_RANGES = [
-  { label: "12h", hours: 12 },
   { label: "24h", hours: 24 },
-  { label: "48h", hours: 48 },
   { label: "7 dni", hours: 168 },
+  { label: "30 dni", hours: 720 },
 ];
 
+// DFRobot rain gauge: każdy 0.1mm opad = wartość rośnie o 1
+// Założenie: wartość w bazie to kumulacyjna liczba przechylów
+// Jeśli ostatnio zmierzyliśmy 0.8, a teraz jest 0.9, to spadło 0.1mm
+const RAIN_GAUGE_INCREMENT = 0.01; // mm per tick (jeśli DFRobot liczy w krokach co 0.01mm)
+
 export default function Dashboard() {
-  const [data, setData] = useState<Measurement[]>([]); // Tu trzymamy surowe dane
+  const [data, setData] = useState<Measurement[]>([]);
   const [stations, setStations] = useState<Station[]>([]);
   const [selectedStationId, setSelectedStationId] = useState<string>("");
   const [loading, setLoading] = useState(true);
   const [selectedRange, setSelectedRange] = useState(24);
+  const [showRainChart, setShowRainChart] = useState(false);
 
-  // --- 1. POBIERANIE LISTY STACJI (z konfiguracją JSON) ---
+  // --- 1. POBIERANIE LISTY STACJI ---
   useEffect(() => {
     const fetchStations = async () => {
       const { data: stationsData } = await supabase.from("stations").select("*");
@@ -94,33 +108,71 @@ export default function Dashboard() {
     return () => { supabase.removeChannel(channel); };
   }, [selectedStationId, selectedRange]);
 
-  // --- 3. MAGIA KALIBRACJI (Przeliczanie w locie) ---
+  // --- 3. KALIBRACJA TEMPERATURY I WILGOTNOŚCI ---
   const currentStation = stations.find(s => s.id === selectedStationId);
   const tempOffset = currentStation?.sensors_config?.temp_air?.offset || 0;
   const humOffset = currentStation?.sensors_config?.humidity?.offset || 0;
 
-  // Tworzymy nową tablicę ze skalibrowanymi wartościami, gotową do wyświetlenia
   const calibratedData = data.map(d => ({
     ...d,
-    raw_temperature: d.temperature, // Zostawiamy w razie W
+    raw_temperature: d.temperature,
     raw_humidity: d.humidity,
-    // Aplikujemy offsety z bazy:
     temperature: d.temperature + tempOffset,
-    // Zabezpieczenie: wilgotność nie może wyjść poza 0-100%
     humidity: Math.max(0, Math.min(100, d.humidity + humOffset)), 
   }));
 
-  // --- FUNKCJE FORMATUJĄCE ---
-  const formatAxisDate = (isoString: string) => new Date(isoString).toLocaleTimeString("pl-PL", { hour: "2-digit", minute: "2-digit" });
+  // --- 4. MAGIA DESZCZU - OBLICZANIE OPADÓW GODZINOWYCH/DOBOWYCH ---
+  // Kluczowa logika: rain gauge to LICZNIK PRZECHYLÓW (kumulacyjny)
+  // Aby wiedzieć ile spadło w danym okresie, bierz różnicę między pomiarami
   
-  // Używamy ZAWSZE zaktualizowanych danych (calibratedData) do statystyk!
+  const getRainData = () => {
+    if (calibratedData.length < 2) return [];
+
+    // Grupujemy pomiary po dniach (dla zakresu 24h+)
+    const rainByDay: Record<string, { date: string; precipitation: number; count: number }> = {};
+
+    for (let i = 1; i < calibratedData.length; i++) {
+      const prev = calibratedData[i - 1];
+      const curr = calibratedData[i];
+
+      const prevRain = parseFloat(String(prev.extra_data?.rain_intensity || 0));
+      const currRain = parseFloat(String(curr.extra_data?.rain_intensity || 0));
+
+      // Jeśli wartość wzrosła, to padało
+      const rainDiff = currRain > prevRain ? (currRain - prevRain) * RAIN_GAUGE_INCREMENT : 0;
+
+      if (rainDiff > 0) {
+        const dayKey = new Date(curr.created_at).toLocaleDateString("pl-PL");
+        if (!rainByDay[dayKey]) {
+          rainByDay[dayKey] = { date: dayKey, precipitation: 0, count: 0 };
+        }
+        rainByDay[dayKey].precipitation += rainDiff;
+        rainByDay[dayKey].count += 1;
+      }
+    }
+
+    // Konwertuj do tablicy dla wykresu
+    return Object.values(rainByDay)
+      .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime())
+      .map(d => ({
+        ...d,
+        precipitation: parseFloat(d.precipitation.toFixed(2))
+      }));
+  };
+
+  const rainChartData = getRainData();
+  const totalRain = rainChartData.reduce((sum, d) => sum + d.precipitation, 0);
+  const maxRainDay = rainChartData.length > 0 
+    ? Math.max(...rainChartData.map(d => d.precipitation))
+    : 0;
+
+  // --- STATYSTYKI OGÓLNE ---
   const last = calibratedData.length > 0 ? calibratedData[calibratedData.length - 1] : null;
   const isOffline = last ? (new Date().getTime() - new Date(last.created_at).getTime()) > 30 * 60 * 1000 : true;
 
   const minTemp = calibratedData.length ? Math.min(...calibratedData.map(d => d.temperature)) : null;
   const maxTemp = calibratedData.length ? Math.max(...calibratedData.map(d => d.temperature)) : null;
 
-  // --- BATERIA I ZASIĘG ---
   const getBatteryPercentage = (voltage: number | undefined) => {
     if (!voltage) return "--";
     const percentage = ((voltage - 3.2) / (4.2 - 3.2)) * 100;
@@ -142,13 +194,16 @@ export default function Dashboard() {
     return { text: "Słaby", color: "text-yellow-400" };
   };
 
+  const formatAxisDate = (isoString: string) => new Date(isoString).toLocaleTimeString("pl-PL", { hour: "2-digit", minute: "2-digit" });
+
   // --- ALERTY SADOWNICZE ---
   const isFrostWarning = last && last.temperature <= 2.5;
   const isFungusWarning = last && last.humidity >= 85 && last.temperature >= 10;
+  const isHighRain = totalRain > 20; // Jeśli spadło >20mm w wybranym okresie
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-200 p-4 md:p-8 font-sans">
-      <div className="max-w-6xl mx-auto space-y-6">
+      <div className="max-w-7xl mx-auto space-y-6">
         
         {/* --- NAGŁÓWEK --- */}
         <div className="flex flex-col md:flex-row justify-between items-start md:items-center border-b border-slate-800 pb-6 gap-4">
@@ -163,16 +218,15 @@ export default function Dashboard() {
             </p>
           </div>
 
-          <div className="flex flex-col sm:flex-row gap-3 w-full md:w-auto items-center">
-            <div className="flex items-center bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 shadow-sm">
-              <MapPin className="w-5 h-5 text-emerald-500 mr-2" />
-              <select
-                value={selectedStationId}
+          <div className="flex flex-col gap-3">
+            <div>
+              <label className="text-xs text-slate-400 uppercase tracking-wider font-semibold block mb-2">Wybierz Stację</label>
+              <select 
+                value={selectedStationId} 
                 onChange={(e) => setSelectedStationId(e.target.value)}
-                className="bg-transparent text-sm font-medium text-white focus:outline-none cursor-pointer w-full"
-                disabled={stations.length === 0}
+                className="bg-slate-900 border border-slate-700 text-white px-3 py-2 rounded-lg text-sm"
               >
-                {stations.length === 0 ? <option>Ładowanie stacji...</option> : stations.map((s) => (
+                {stations.map((s) => (
                   <option key={s.id} value={s.id}>{s.name}</option>
                 ))}
               </select>
@@ -199,105 +253,118 @@ export default function Dashboard() {
             <WifiOff className="w-6 h-6" />
             <div>
               <p className="font-bold">Utracono połączenie ze stacją!</p>
-              <p className="text-sm text-red-300">Ostatni pomiar jest starszy niż 30 minut. Sprawdź zasilanie w sadzie.</p>
+              <p className="text-sm text-red-300">Ostatni pomiar jest starszy niż 30 minut.</p>
             </div>
           </div>
         )}
 
         {/* --- KAFELKI KPI --- */}
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
           
-          {/* Temperatura */}
+          {/* Temperatura Powietrza */}
           <div className={`p-6 rounded-xl border relative overflow-hidden transition-colors ${isFrostWarning ? 'bg-blue-950/40 border-blue-800' : 'bg-slate-900 border-slate-800'}`}>
-            <div className="flex justify-between items-start mb-4">
-              <div className="flex items-center gap-2">
-                <Thermometer className={`w-5 h-5 ${isFrostWarning ? 'text-blue-400' : 'text-orange-500'}`} />
-                <span className="text-slate-400 text-xs uppercase tracking-wider font-semibold">Temperatura Powietrza</span>
-              </div>
-              <div className="flex gap-2 text-xs font-mono">
-                <span className="text-blue-400 bg-blue-500/10 px-2 rounded">↓ {minTemp?.toFixed(1)}°</span>
-                <span className="text-red-400 bg-red-500/10 px-2 rounded">↑ {maxTemp?.toFixed(1)}°</span>
-              </div>
+            <div className="flex items-center gap-2 mb-4">
+              <Thermometer className={`w-5 h-5 ${isFrostWarning ? 'text-blue-400' : 'text-orange-500'}`} />
+              <span className="text-slate-400 text-xs uppercase tracking-wider font-semibold">Temperatura</span>
             </div>
-            <div className={`text-5xl font-bold mb-2 ${isFrostWarning ? 'text-blue-100' : 'text-white'}`}>
+            <div className={`text-4xl font-bold mb-2 ${isFrostWarning ? 'text-blue-100' : 'text-white'}`}>
               {last ? `${last.temperature.toFixed(1)}°C` : "--"}
             </div>
-            
-            {/* Wskaźnik kalibracji */}
-            <div className="flex items-center justify-between mt-2">
-              <div className={`text-sm flex items-center gap-2 ${isFrostWarning ? 'text-blue-400 font-medium' : 'text-slate-500'}`}>
-                {isFrostWarning ? <><Snowflake className="w-4 h-4"/> Uwaga! Ryzyko przymrozku</> : "Warunki optymalne"}
-              </div>
-              {tempOffset !== 0 && (
-                <div className="text-xs text-slate-500 bg-slate-950 px-2 py-1 rounded flex items-center gap-1 border border-slate-800" title={`Odczyt surowy: ${last?.raw_temperature.toFixed(1)}°C`}>
-                  <SlidersHorizontal className="w-3 h-3" /> Korekta {tempOffset > 0 ? `+${tempOffset}` : tempOffset}°C
-                </div>
-              )}
+            <div className="text-xs text-slate-500 flex gap-2">
+              <span className="text-blue-400">↓{minTemp?.toFixed(1)}°</span>
+              <span className="text-red-400">↑{maxTemp?.toFixed(1)}°</span>
             </div>
           </div>
 
-          {/* Wilgotność */}
+          {/* Wilgotność Powietrza */}
           <div className={`p-6 rounded-xl border relative overflow-hidden transition-colors ${isFungusWarning ? 'bg-emerald-950/40 border-emerald-800' : 'bg-slate-900 border-slate-800'}`}>
             <div className="flex items-center gap-2 mb-4">
               <Droplets className="w-5 h-5 text-sky-500" />
-              <span className="text-slate-400 text-xs uppercase tracking-wider font-semibold">Wilgotność Względna</span>
+              <span className="text-slate-400 text-xs uppercase tracking-wider font-semibold">Wilgotność</span>
             </div>
-            <div className="text-5xl font-bold text-white mb-2">
+            <div className="text-4xl font-bold text-white mb-2">
               {last ? `${last.humidity.toFixed(0)}%` : "--"}
             </div>
-            
-            <div className="flex items-center justify-between mt-2">
-              <div className={`text-sm flex items-center gap-2 ${isFungusWarning ? 'text-emerald-400 font-medium' : 'text-slate-500'}`}>
-                {isFungusWarning ? <><AlertTriangle className="w-4 h-4"/> Wysokie ryzyko infekcji grzybowej</> : "Brak zagrożeń"}
-              </div>
-              {humOffset !== 0 && (
-                <div className="text-xs text-slate-500 bg-slate-950 px-2 py-1 rounded flex items-center gap-1 border border-slate-800" title={`Odczyt surowy: ${last?.raw_humidity.toFixed(0)}%`}>
-                  <SlidersHorizontal className="w-3 h-3" /> Korekta {humOffset > 0 ? `+${humOffset}` : humOffset}%
-                </div>
-              )}
+            <div className="text-xs text-slate-500">
+              {isFungusWarning ? "⚠️ Ryzyko grzyba" : "Norma"}
             </div>
           </div>
 
-          {/* Diagnostyka (Bateria i Sygnał) - Bez zmian */}
-          <div className="p-6 rounded-xl border bg-slate-900 border-slate-800 flex flex-col justify-between">
-             <div className="flex items-center gap-2 mb-4">
-              <Activity className="w-5 h-5 text-slate-400" />
-              <span className="text-slate-400 text-xs uppercase tracking-wider font-semibold">Diagnostyka Urządzenia</span>
+          {/* Temperatura Gleby */}
+          <div className="p-6 rounded-xl border bg-slate-900 border-slate-800">
+            <div className="flex items-center gap-2 mb-4">
+              <Thermometer className="w-5 h-5 text-amber-600" />
+              <span className="text-slate-400 text-xs uppercase tracking-wider font-semibold">Gleba °C</span>
             </div>
-            <div className="space-y-4">
-              <div className="flex justify-between items-center bg-slate-950 p-3 rounded-lg border border-slate-800/50">
-                <div className="flex items-center gap-3">
-                  <Battery className={`w-6 h-6 ${getBatteryColor(last?.battery_voltage)}`} />
-                  <span className="text-sm font-medium text-slate-300">Zasilanie (18650)</span>
-                </div>
-                <div className="text-right">
-                  <div className={`text-lg font-bold ${getBatteryColor(last?.battery_voltage)}`}>{getBatteryPercentage(last?.battery_voltage)}</div>
-                  <div className="text-xs text-slate-500">{last?.battery_voltage ? `${last.battery_voltage.toFixed(2)} V` : "--"}</div>
-                </div>
-              </div>
-              <div className="flex justify-between items-center bg-slate-950 p-3 rounded-lg border border-slate-800/50">
-                <div className="flex items-center gap-3">
-                  <Signal className={`w-6 h-6 ${getSignalInfo(last?.signal_strength).color}`} />
-                  <span className="text-sm font-medium text-slate-300">Sieć Komórkowa</span>
-                </div>
-                <div className="text-right">
-                  <div className={`text-sm font-bold ${getSignalInfo(last?.signal_strength).color}`}>{getSignalInfo(last?.signal_strength).text}</div>
-                  <div className="text-xs text-slate-500">CSQ: {last?.signal_strength ?? "--"}/31</div>
-                </div>
-              </div>
+            <div className="text-4xl font-bold text-amber-300 mb-2">
+              {last?.extra_data?.soil_temperature ? `${parseFloat(String(last.extra_data.soil_temperature)).toFixed(1)}°` : "--"}
+            </div>
+            <div className="text-xs text-slate-500">Temperatura gruntu</div>
+          </div>
+
+          {/* Wilgotność Gleby */}
+          <div className="p-6 rounded-xl border bg-slate-900 border-slate-800">
+            <div className="flex items-center gap-2 mb-4">
+              <Droplet className="w-5 h-5 text-cyan-500" />
+              <span className="text-slate-400 text-xs uppercase tracking-wider font-semibold">Wilg. Gleby</span>
+            </div>
+            <div className="text-4xl font-bold text-cyan-300 mb-2">
+              {last?.extra_data?.soil_moisture ? `${parseFloat(String(last.extra_data.soil_moisture)).toFixed(0)}%` : "--"}
+            </div>
+            <div className="text-xs text-slate-500">Zawartość wody</div>
+          </div>
+
+          {/* Opad - NOWA LOGIKA */}
+          <div className={`p-6 rounded-xl border ${isHighRain ? 'bg-cyan-950/40 border-cyan-800' : 'bg-slate-900 border-slate-800'}`}>
+            <div className="flex items-center gap-2 mb-4">
+              <Cloud className={`w-5 h-5 ${isHighRain ? 'text-cyan-400' : 'text-slate-400'}`} />
+              <span className="text-slate-400 text-xs uppercase tracking-wider font-semibold">Opad</span>
+            </div>
+            <div className={`text-4xl font-bold mb-2 ${isHighRain ? 'text-cyan-300' : 'text-white'}`}>
+              {totalRain.toFixed(1)}mm
+            </div>
+            <div className="text-xs text-slate-500">
+              {selectedRange === 24 ? "za 24h" : selectedRange === 168 ? "za 7 dni" : "za 30 dni"}
             </div>
           </div>
         </div>
 
-        {/* --- WYKRESY (Zasilone skalibrowanymi danymi!) --- */}
-        <div className="grid lg:grid-cols-2 gap-6 mt-6">
+        {/* --- DIAGNOSTYKA URZĄDZENIA --- */}
+        <div className="bg-slate-900 p-6 rounded-xl border border-slate-800">
+          <div className="flex items-center gap-2 mb-4">
+            <Activity className="w-5 h-5 text-slate-400" />
+            <span className="text-slate-400 text-xs uppercase tracking-wider font-semibold">Diagnostyka Urządzenia</span>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="flex justify-between items-center bg-slate-950 p-4 rounded-lg border border-slate-800/50">
+              <div className="flex items-center gap-3">
+                <Battery className={`w-6 h-6 ${getBatteryColor(last?.battery_voltage)}`} />
+                <div>
+                  <span className="text-sm font-medium text-slate-300 block">Zasilanie (18650)</span>
+                  <span className="text-xs text-slate-500">{last?.battery_voltage ? `${last.battery_voltage.toFixed(2)} V` : "--"}</span>
+                </div>
+              </div>
+              <div className={`text-2xl font-bold ${getBatteryColor(last?.battery_voltage)}`}>{getBatteryPercentage(last?.battery_voltage)}</div>
+            </div>
+            <div className="flex justify-between items-center bg-slate-950 p-4 rounded-lg border border-slate-800/50">
+              <div className="flex items-center gap-3">
+                <Signal className={`w-6 h-6 ${getSignalInfo(last?.signal_strength).color}`} />
+                <div>
+                  <span className="text-sm font-medium text-slate-300 block">Sieć Komórkowa</span>
+                  <span className="text-xs text-slate-500">CSQ: {last?.signal_strength ?? "--"}/31</span>
+                </div>
+              </div>
+              <div className={`text-sm font-bold ${getSignalInfo(last?.signal_strength).color}`}>{getSignalInfo(last?.signal_strength).text}</div>
+            </div>
+          </div>
+        </div>
+
+        {/* --- WYKRESY TEMPERATURY I WILGOTNOŚCI --- */}
+        <div className="grid lg:grid-cols-2 gap-6">
           <div className="bg-slate-900 p-5 rounded-xl border border-slate-800">
-            <h3 className="text-sm font-medium text-slate-400 mb-6 flex justify-between">
-              <span>Historia Temperatury</span>
-            </h3>
+            <h3 className="text-sm font-medium text-slate-400 mb-6">Historia Temperatury</h3>
             <div className="h-64 w-full">
               <ResponsiveContainer width="100%" height="100%">
-                {/* TUTAJ WCHODZĄ PRZELICZONE DANE: data={calibratedData} */}
                 <AreaChart data={calibratedData}>
                   <defs>
                     <linearGradient id="gradTemp" x1="0" y1="0" x2="0" y2="1">
@@ -316,12 +383,9 @@ export default function Dashboard() {
           </div>
 
           <div className="bg-slate-900 p-5 rounded-xl border border-slate-800">
-            <h3 className="text-sm font-medium text-slate-400 mb-6 flex justify-between">
-              <span>Historia Wilgotności</span>
-            </h3>
+            <h3 className="text-sm font-medium text-slate-400 mb-6">Historia Wilgotności</h3>
             <div className="h-64 w-full">
               <ResponsiveContainer width="100%" height="100%">
-                {/* TUTAJ WCHODZĄ PRZELICZONE DANE: data={calibratedData} */}
                 <LineChart data={calibratedData}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" vertical={false} />
                   <XAxis dataKey="created_at" tickFormatter={formatAxisDate} stroke="#475569" fontSize={11} minTickGap={30} />
@@ -333,6 +397,60 @@ export default function Dashboard() {
             </div>
           </div>
         </div>
+
+        {/* --- WYKRES OPADÓW DOBOWYCH (NOWY!) --- */}
+        {rainChartData.length > 0 && (
+          <div className="bg-slate-900 p-5 rounded-xl border border-slate-800">
+            <div className="flex justify-between items-center mb-6">
+              <div>
+                <h3 className="text-sm font-medium text-slate-400">Historia Opadów</h3>
+                <p className="text-xs text-slate-500 mt-1">
+                  Łącznie: <span className="font-bold text-cyan-400">{totalRain.toFixed(1)} mm</span> | 
+                  Max dziennie: <span className="font-bold text-cyan-400">{maxRainDay.toFixed(1)} mm</span>
+                </p>
+              </div>
+              <div className="flex items-center gap-2 text-xs text-slate-400">
+                <Cloud className="w-4 h-4" />
+                {rainChartData.length} dni z opadem
+              </div>
+            </div>
+            <div className="h-72 w-full">
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={rainChartData}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" vertical={false} />
+                  <XAxis 
+                    dataKey="date" 
+                    stroke="#475569" 
+                    fontSize={11}
+                    angle={-45}
+                    textAnchor="end"
+                    height={80}
+                  />
+                  <YAxis stroke="#475569" fontSize={11} label={{ value: 'mm', angle: -90, position: 'insideLeft' }} width={45} />
+                  <Tooltip 
+                    contentStyle={{ backgroundColor: "#0f172a", borderColor: "#334155" }} 
+                    itemStyle={{ color: "#06b6d4" }}
+                    formatter={(value) => [`${value.toFixed(2)} mm`, "Opad"]}
+                    labelFormatter={(label) => `${label}`}
+                  />
+                  <Bar dataKey="precipitation" fill="#06b6d4" radius={[8, 8, 0, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+
+            {/* Informacja o rain gauge */}
+            <div className="mt-6 p-4 bg-slate-950 rounded-lg border border-slate-800">
+              <div className="flex items-start gap-3">
+                <TrendingDown className="w-5 h-5 text-cyan-400 mt-0.5 flex-shrink-0" />
+                <div className="text-xs text-slate-400 space-y-1">
+                  <p><span className="font-semibold text-slate-300">DFRobot Rain Gauge (Kumulacyjny)</span></p>
+                  <p>Sensor oblicza różnicę między pomiarami aby wyznaczyć rzeczywisty opad. Wartość w bazie to kumulacyjna liczba przechylów od włączenia.</p>
+                  <p>Wykres pokazuje opady <span className="text-cyan-300 font-medium">według dni</span> w wybranym przedziale czasowym.</p>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
 
       </div>
     </div>
