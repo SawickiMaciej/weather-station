@@ -6,9 +6,8 @@ import {
   AreaChart, Area, LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
 } from "recharts";
 import {
-  Thermometer, Droplets, MapPin, CalendarClock, AlertTriangle, WifiOff,
-  ArrowDown, ArrowUp, Battery, Signal, Snowflake, Leaf, Activity, SlidersHorizontal,
-  Droplet, Cloud, Zap, TrendingDown
+  Thermometer, Droplets, Activity, Cloud, Battery, Signal, WifiOff,
+  Leaf, TrendingDown, Droplet, Zap
 } from "lucide-react";
 
 // --- KONFIGURACJA SUPABASE ---
@@ -20,7 +19,7 @@ const supabase = createBrowserClient(supabaseUrl, supabaseAnonKey);
 type ExtraData = {
   soil_moisture?: string | number;
   soil_temperature?: string | number;
-  rain_intensity?: string | number; // ZMIENIONA NAZWA - to jest kumulacyjny rain gauge!
+  rain_intensity?: string | number; 
   [key: string]: any;
 };
 
@@ -38,19 +37,15 @@ type Station = {
   id: string; 
   name: string;
   sensors_config?: Record<string, { name: string; offset: number }>;
-  rain_gauge_baseline?: number; // Kumulacyjna wartość z ostatniego resetu
+  rain_gauge_baseline?: number; 
 };
 
 const TIME_RANGES = [
   { label: "24h", hours: 24 },
+  { label: "48h", hours: 48 },
   { label: "7 dni", hours: 168 },
   { label: "30 dni", hours: 720 },
 ];
-
-// DFRobot rain gauge: każdy 0.1mm opad = wartość rośnie o 1
-// Założenie: wartość w bazie to kumulacyjna liczba przechylów
-// Jeśli ostatnio zmierzyliśmy 0.8, a teraz jest 0.9, to spadło 0.1mm
-const RAIN_GAUGE_INCREMENT = 0.01; // mm per tick (jeśli DFRobot liczy w krokach co 0.01mm)
 
 export default function Dashboard() {
   const [data, setData] = useState<Measurement[]>([]);
@@ -58,7 +53,10 @@ export default function Dashboard() {
   const [selectedStationId, setSelectedStationId] = useState<string>("");
   const [loading, setLoading] = useState(true);
   const [selectedRange, setSelectedRange] = useState(24);
-  const [showRainChart, setShowRainChart] = useState(false);
+  
+  // Stany dla niezależnego wykresu deszczu
+  const [rainRangeDays, setRainRangeDays] = useState(7); 
+  const [rainData, setRainData] = useState<Measurement[]>([]);
 
   // --- 1. POBIERANIE LISTY STACJI ---
   useEffect(() => {
@@ -72,7 +70,7 @@ export default function Dashboard() {
     fetchStations();
   }, [selectedStationId]);
 
-  // --- 2. POBIERANIE POMIARÓW ---
+  // --- 2. POBIERANIE POMIARÓW (Dla reszty czujników) ---
   useEffect(() => {
     if (!selectedStationId) return;
 
@@ -108,7 +106,30 @@ export default function Dashboard() {
     return () => { supabase.removeChannel(channel); };
   }, [selectedStationId, selectedRange]);
 
-  // --- 3. KALIBRACJA TEMPERATURY I WILGOTNOŚCI ---
+  // --- 3. ODDZIELNE POBIERANIE DANYCH TYLKO DLA DESZCZU ---
+  useEffect(() => {
+    if (!selectedStationId) return;
+
+    const fetchRain = async () => {
+      const startDate = new Date();
+      startDate.setDate(startDate.getDate() - rainRangeDays - 1); 
+
+      const { data, error } = await supabase
+        .from("measurements")
+        .select("created_at, extra_data") // Zoptymalizowane zapytanie
+        .eq("station_id", selectedStationId)
+        .gte("created_at", startDate.toISOString())
+        .order("created_at", { ascending: true });
+
+      if (!error) {
+        setRainData(data || []);
+      }
+    };
+
+    fetchRain();
+  }, [selectedStationId, rainRangeDays]);
+
+  // --- 4. KALIBRACJA TEMPERATURY I WILGOTNOŚCI ---
   const currentStation = stations.find(s => s.id === selectedStationId);
   const tempOffset = currentStation?.sensors_config?.temp_air?.offset || 0;
   const humOffset = currentStation?.sensors_config?.humidity?.offset || 0;
@@ -121,50 +142,50 @@ export default function Dashboard() {
     humidity: Math.max(0, Math.min(100, d.humidity + humOffset)), 
   }));
 
-  // --- 4. MAGIA DESZCZU - OBLICZANIE OPADÓW GODZINOWYCH/DOBOWYCH ---
-  // Kluczowa logika: rain gauge to LICZNIK PRZECHYLÓW (kumulacyjny)
-  // Aby wiedzieć ile spadło w danym okresie, bierz różnicę między pomiarami
-  
-  const getRainData = () => {
-    if (calibratedData.length < 2) return [];
+  // --- 5. MAGIA DESZCZU - OBLICZANIE OPADÓW I PUSTYCH DNI ---
+  const getRainChartData = () => {
+    const rainByDay: Record<string, { sortKey: string; displayDate: string; precipitation: number }> = {};
+    
+    // Generowanie pustych dni
+    for (let i = rainRangeDays - 1; i >= 0; i--) {
+      const d = new Date();
+      d.setDate(d.getDate() - i);
+      const sortKey = d.toISOString().split('T')[0]; 
+      const displayKey = d.toLocaleDateString("pl-PL", { day: '2-digit', month: '2-digit' });
+      rainByDay[sortKey] = { sortKey, displayDate: displayKey, precipitation: 0 };
+    }
 
-    // Grupujemy pomiary po dniach (dla zakresu 24h+)
-    const rainByDay: Record<string, { date: string; precipitation: number; count: number }> = {};
+    if (rainData.length >= 2) {
+      for (let i = 1; i < rainData.length; i++) {
+        const prev = rainData[i - 1];
+        const curr = rainData[i];
 
-    for (let i = 1; i < calibratedData.length; i++) {
-      const prev = calibratedData[i - 1];
-      const curr = calibratedData[i];
+        const prevRain = parseFloat(String(prev.extra_data?.rain_intensity || 0));
+        const currRain = parseFloat(String(curr.extra_data?.rain_intensity || 0));
 
-      const prevRain = parseFloat(String(prev.extra_data?.rain_intensity || 0));
-      const currRain = parseFloat(String(curr.extra_data?.rain_intensity || 0));
+        // Bez niepotrzebnego mnożenia
+        const rainDiff = currRain > prevRain ? (currRain - prevRain) : 0;
 
-      // Jeśli wartość wzrosła, to padało
-      const rainDiff = currRain > prevRain ? (currRain - prevRain) * RAIN_GAUGE_INCREMENT : 0;
-
-      if (rainDiff > 0) {
-        const dayKey = new Date(curr.created_at).toLocaleDateString("pl-PL");
-        if (!rainByDay[dayKey]) {
-          rainByDay[dayKey] = { date: dayKey, precipitation: 0, count: 0 };
+        if (rainDiff > 0) {
+          const dateObj = new Date(curr.created_at);
+          const sortKey = dateObj.toISOString().split('T')[0];
+          
+          if (rainByDay[sortKey]) {
+            rainByDay[sortKey].precipitation += rainDiff;
+          }
         }
-        rainByDay[dayKey].precipitation += rainDiff;
-        rainByDay[dayKey].count += 1;
       }
     }
 
-    // Konwertuj do tablicy dla wykresu
-    return Object.values(rainByDay)
-      .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime())
-      .map(d => ({
-        ...d,
-        precipitation: parseFloat(d.precipitation.toFixed(2))
-      }));
+    return Object.values(rainByDay).map(d => ({
+      date: d.displayDate,
+      precipitation: parseFloat(d.precipitation.toFixed(2))
+    }));
   };
 
-  const rainChartData = getRainData();
-  const totalRain = rainChartData.reduce((sum, d) => sum + d.precipitation, 0);
-  const maxRainDay = rainChartData.length > 0 
-    ? Math.max(...rainChartData.map(d => d.precipitation))
-    : 0;
+  const finalRainData = getRainChartData();
+  const totalRain = finalRainData.reduce((sum, d) => sum + d.precipitation, 0);
+  const maxRainDay = finalRainData.length > 0 ? Math.max(...finalRainData.map(d => d.precipitation)) : 0;
 
   // --- STATYSTYKI OGÓLNE ---
   const last = calibratedData.length > 0 ? calibratedData[calibratedData.length - 1] : null;
@@ -172,6 +193,16 @@ export default function Dashboard() {
 
   const minTemp = calibratedData.length ? Math.min(...calibratedData.map(d => d.temperature)) : null;
   const maxTemp = calibratedData.length ? Math.max(...calibratedData.map(d => d.temperature)) : null;
+
+  // --- WYKRYWANIE ŁADOWANIA BATERII ---
+  let isCharging = false;
+  if (calibratedData.length > 5) {
+    const recentVoltage = calibratedData[calibratedData.length - 1].battery_voltage;
+    const olderVoltage = calibratedData[calibratedData.length - 5].battery_voltage; 
+    isCharging = (recentVoltage - olderVoltage) >= 0.02;
+  } else if (calibratedData.length > 1) {
+    isCharging = calibratedData[calibratedData.length - 1].battery_voltage - calibratedData[0].battery_voltage >= 0.01;
+  }
 
   const getBatteryPercentage = (voltage: number | undefined) => {
     if (!voltage) return "--";
@@ -199,7 +230,7 @@ export default function Dashboard() {
   // --- ALERTY SADOWNICZE ---
   const isFrostWarning = last && last.temperature <= 2.5;
   const isFungusWarning = last && last.humidity >= 85 && last.temperature >= 10;
-  const isHighRain = totalRain > 20; // Jeśli spadło >20mm w wybranym okresie
+  const isHighRain = totalRain > 20; 
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-200 p-4 md:p-8 font-sans">
@@ -261,7 +292,6 @@ export default function Dashboard() {
         {/* --- KAFELKI KPI --- */}
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
           
-          {/* Temperatura Powietrza */}
           <div className={`p-6 rounded-xl border relative overflow-hidden transition-colors ${isFrostWarning ? 'bg-blue-950/40 border-blue-800' : 'bg-slate-900 border-slate-800'}`}>
             <div className="flex items-center gap-2 mb-4">
               <Thermometer className={`w-5 h-5 ${isFrostWarning ? 'text-blue-400' : 'text-orange-500'}`} />
@@ -276,7 +306,6 @@ export default function Dashboard() {
             </div>
           </div>
 
-          {/* Wilgotność Powietrza */}
           <div className={`p-6 rounded-xl border relative overflow-hidden transition-colors ${isFungusWarning ? 'bg-emerald-950/40 border-emerald-800' : 'bg-slate-900 border-slate-800'}`}>
             <div className="flex items-center gap-2 mb-4">
               <Droplets className="w-5 h-5 text-sky-500" />
@@ -290,7 +319,6 @@ export default function Dashboard() {
             </div>
           </div>
 
-          {/* Temperatura Gleby */}
           <div className="p-6 rounded-xl border bg-slate-900 border-slate-800">
             <div className="flex items-center gap-2 mb-4">
               <Thermometer className="w-5 h-5 text-amber-600" />
@@ -302,7 +330,6 @@ export default function Dashboard() {
             <div className="text-xs text-slate-500">Temperatura gruntu</div>
           </div>
 
-          {/* Wilgotność Gleby */}
           <div className="p-6 rounded-xl border bg-slate-900 border-slate-800">
             <div className="flex items-center gap-2 mb-4">
               <Droplet className="w-5 h-5 text-cyan-500" />
@@ -314,7 +341,6 @@ export default function Dashboard() {
             <div className="text-xs text-slate-500">Zawartość wody</div>
           </div>
 
-          {/* Opad - NOWA LOGIKA */}
           <div className={`p-6 rounded-xl border ${isHighRain ? 'bg-cyan-950/40 border-cyan-800' : 'bg-slate-900 border-slate-800'}`}>
             <div className="flex items-center gap-2 mb-4">
               <Cloud className={`w-5 h-5 ${isHighRain ? 'text-cyan-400' : 'text-slate-400'}`} />
@@ -324,7 +350,7 @@ export default function Dashboard() {
               {totalRain.toFixed(1)}mm
             </div>
             <div className="text-xs text-slate-500">
-              {selectedRange === 24 ? "za 24h" : selectedRange === 168 ? "za 7 dni" : "za 30 dni"}
+              W wybranym {rainRangeDays} dni
             </div>
           </div>
         </div>
@@ -338,9 +364,21 @@ export default function Dashboard() {
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div className="flex justify-between items-center bg-slate-950 p-4 rounded-lg border border-slate-800/50">
               <div className="flex items-center gap-3">
-                <Battery className={`w-6 h-6 ${getBatteryColor(last?.battery_voltage)}`} />
+                <div className="relative">
+                  <Battery className={`w-6 h-6 ${getBatteryColor(last?.battery_voltage)}`} />
+                  {isCharging && (
+                    <Zap className="w-3 h-3 text-yellow-400 absolute -bottom-1 -right-1 animate-pulse fill-yellow-400" />
+                  )}
+                </div>
                 <div>
-                  <span className="text-sm font-medium text-slate-300 block">Zasilanie (18650)</span>
+                  <span className="text-sm font-medium text-slate-300 flex items-center gap-2">
+                    Zasilanie (18650)
+                    {isCharging && (
+                      <span className="text-[9px] text-yellow-400 font-bold uppercase tracking-wider bg-yellow-400/10 border border-yellow-400/20 px-1.5 py-0.5 rounded">
+                        Ładuje
+                      </span>
+                    )}
+                  </span>
                   <span className="text-xs text-slate-500">{last?.battery_voltage ? `${last.battery_voltage.toFixed(2)} V` : "--"}</span>
                 </div>
               </div>
@@ -398,59 +436,69 @@ export default function Dashboard() {
           </div>
         </div>
 
-        {/* --- WYKRES OPADÓW DOBOWYCH (NOWY!) --- */}
-        {rainChartData.length > 0 && (
-          <div className="bg-slate-900 p-5 rounded-xl border border-slate-800">
-            <div className="flex justify-between items-center mb-6">
-              <div>
-                <h3 className="text-sm font-medium text-slate-400">Historia Opadów</h3>
-                <p className="text-xs text-slate-500 mt-1">
-                  Łącznie: <span className="font-bold text-cyan-400">{totalRain.toFixed(1)} mm</span> | 
-                  Max dziennie: <span className="font-bold text-cyan-400">{maxRainDay.toFixed(1)} mm</span>
-                </p>
-              </div>
-              <div className="flex items-center gap-2 text-xs text-slate-400">
-                <Cloud className="w-4 h-4" />
-                {rainChartData.length} dni z opadem
-              </div>
+        {/* --- WYKRES OPADÓW DOBOWYCH --- */}
+        <div className="bg-slate-900 p-5 rounded-xl border border-slate-800">
+          <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-6 gap-4">
+            <div>
+              <h3 className="text-sm font-medium text-slate-400">Historia Opadów</h3>
+              <p className="text-xs text-slate-500 mt-1">
+                Łącznie: <span className="font-bold text-cyan-400">{totalRain.toFixed(1)} mm</span> | 
+                Max dziennie: <span className="font-bold text-cyan-400">{maxRainDay.toFixed(1)} mm</span>
+              </p>
             </div>
-            <div className="h-72 w-full">
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={rainChartData}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" vertical={false} />
-                  <XAxis 
-                    dataKey="date" 
-                    stroke="#475569" 
-                    fontSize={11}
-                    angle={-45}
-                    textAnchor="end"
-                    height={80}
-                  />
-                  <YAxis stroke="#475569" fontSize={11} label={{ value: 'mm', angle: -90, position: 'insideLeft' }} width={45} />
-                  <Tooltip 
-                    contentStyle={{ backgroundColor: "#0f172a", borderColor: "#334155" }} 
-                    itemStyle={{ color: "#06b6d4" }}
-                    formatter={(value) => [`${value.toFixed(2)} mm`, "Opad"]}
-                    labelFormatter={(label) => `${label}`}
-                  />
-                  <Bar dataKey="precipitation" fill="#06b6d4" radius={[8, 8, 0, 0]} />
-                </BarChart>
-              </ResponsiveContainer>
+            
+            <div className="flex bg-slate-950 border border-slate-800 rounded-lg p-1">
+              {[7, 14, 30].map((days) => (
+                <button
+                  key={days}
+                  onClick={() => setRainRangeDays(days)}
+                  className={`px-3 py-1 text-xs rounded-md transition-all ${
+                    rainRangeDays === days ? "bg-cyan-600 text-white font-medium" : "text-slate-400 hover:text-slate-200"
+                  }`}
+                >
+                  {days} dni
+                </button>
+              ))}
             </div>
+          </div>
 
-            {/* Informacja o rain gauge */}
-            <div className="mt-6 p-4 bg-slate-950 rounded-lg border border-slate-800">
-              <div className="flex items-start gap-3">
-                <TrendingDown className="w-5 h-5 text-cyan-400 mt-0.5 flex-shrink-0" />
-                <div className="text-xs text-slate-400 space-y-1">
-                  <p><span className="font-semibold text-slate-300">DFRobot Rain Gauge (Kumulacyjny)</span></p>
-                  <p>Sensor oblicza różnicę między pomiarami aby wyznaczyć rzeczywisty opad. Wartość w bazie to kumulacyjna liczba przechylów od włączenia.</p>
-                  <p>Wykres pokazuje opady <span className="text-cyan-300 font-medium">według dni</span> w wybranym przedziale czasowym.</p>
-                </div>
+          <div className="h-72 w-full">
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={finalRainData}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" vertical={false} />
+                <XAxis 
+                  dataKey="date" 
+                  stroke="#475569" 
+                  fontSize={11}
+                  angle={rainRangeDays > 14 ? -90 : -45}
+                  textAnchor="end"
+                  height={80}
+                  minTickGap={rainRangeDays > 14 ? 15 : 5} 
+                />
+                <YAxis stroke="#475569" fontSize={11} label={{ value: 'mm', angle: -90, position: 'insideLeft' }} width={45} />
+                <Tooltip 
+                  contentStyle={{ backgroundColor: "#0f172a", borderColor: "#334155" }} 
+                  itemStyle={{ color: "#06b6d4" }}
+                  formatter={(value: number) => [`${value.toFixed(2)} mm`, "Opad"]}
+                  labelFormatter={(label) => `Data: ${label}`}
+                  cursor={{ fill: '#1e293b' }} 
+                />
+                <Bar dataKey="precipitation" fill="#06b6d4" radius={[4, 4, 0, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+
+          <div className="mt-6 p-4 bg-slate-950 rounded-lg border border-slate-800">
+            <div className="flex items-start gap-3">
+              <TrendingDown className="w-5 h-5 text-cyan-400 mt-0.5 flex-shrink-0" />
+              <div className="text-xs text-slate-400 space-y-1">
+                <p><span className="font-semibold text-slate-300">DFRobot Rain Gauge (Kumulacyjny)</span></p>
+                <p>Sensor oblicza różnicę między pomiarami aby wyznaczyć rzeczywisty opad. Wartość w bazie to kumulacyjna liczba przechylów od włączenia.</p>
+                <p>Wykres pokazuje opady <span className="text-cyan-300 font-medium">według dni</span> w wybranym przedziale czasowym.</p>
               </div>
             </div>
           </div>
-        )}
+        </div>
 
       </div>
     </div>
