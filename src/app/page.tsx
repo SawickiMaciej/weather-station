@@ -7,7 +7,7 @@ import {
 } from "recharts";
 import {
   Thermometer, Droplets, Activity, Cloud, Battery, Signal, WifiOff,
-  Leaf, TrendingDown, Droplet, Zap
+  Leaf, TrendingDown, Droplet, Zap, Clock
 } from "lucide-react";
 
 // --- KONFIGURACJA SUPABASE ---
@@ -58,11 +58,9 @@ export default function Dashboard() {
   const [rainRangeDays, setRainRangeDays] = useState(7); 
   const [rainData, setRainData] = useState<Measurement[]>([]);
 
-  // --- 1. POBIERANIE LISTY STACJI (Zaktualizowane o obsługę nowej relacji RLS) ---
+  // --- 1. POBIERANIE LISTY STACJI ---
   useEffect(() => {
     const fetchStations = async () => {
-      // Dzięki nowej polityce RLS (Dostęp do stacji przez tabelę łącznikową), 
-      // Supabase zwróci TYLKO te stacje, do których zalogowany użytkownik ma dostęp w tabeli user_stations.
       const { data: stationsData, error } = await supabase.from("stations").select("*");
       
       if (error) {
@@ -72,7 +70,6 @@ export default function Dashboard() {
 
       if (stationsData && stationsData.length > 0) {
         setStations(stationsData);
-        // Jeśli nie mamy wybranej stacji (np. przy pierwszym wejściu), wybieramy pierwszą z brzegu
         if (!selectedStationId) setSelectedStationId(stationsData[0].id);
       } else {
         console.warn("Brak przypisanych stacji dla tego użytkownika.");
@@ -127,7 +124,7 @@ export default function Dashboard() {
 
       const { data, error } = await supabase
         .from("measurements")
-        .select("created_at, extra_data") // Zoptymalizowane zapytanie
+        .select("created_at, extra_data") 
         .eq("station_id", selectedStationId)
         .gte("created_at", startDate.toISOString())
         .order("created_at", { ascending: true });
@@ -157,7 +154,6 @@ export default function Dashboard() {
   const getRainChartData = () => {
     const rainByDay: Record<string, { sortKey: string; displayDate: string; precipitation: number }> = {};
     
-    // Generowanie pustych dni
     for (let i = rainRangeDays - 1; i >= 0; i--) {
       const d = new Date();
       d.setDate(d.getDate() - i);
@@ -174,7 +170,6 @@ export default function Dashboard() {
         const prevRain = parseFloat(String(prev.extra_data?.rain_intensity || 0));
         const currRain = parseFloat(String(curr.extra_data?.rain_intensity || 0));
 
-        // Bez niepotrzebnego mnożenia, dane w bazie są już w mm
         const rainDiff = currRain > prevRain ? (currRain - prevRain) : 0;
 
         if (rainDiff > 0) {
@@ -198,12 +193,27 @@ export default function Dashboard() {
   const totalRain = finalRainData.reduce((sum, d) => sum + d.precipitation, 0);
   const maxRainDay = finalRainData.length > 0 ? Math.max(...finalRainData.map(d => d.precipitation)) : 0;
 
-  // --- STATYSTYKI OGÓLNE ---
+  // --- STATYSTYKI OGÓLNE I CZASOWE ---
   const last = calibratedData.length > 0 ? calibratedData[calibratedData.length - 1] : null;
-  const isOffline = last ? (new Date().getTime() - new Date(last.created_at).getTime()) > 30 * 60 * 1000 : true;
-
+  
   const minTemp = calibratedData.length ? Math.min(...calibratedData.map(d => d.temperature)) : null;
   const maxTemp = calibratedData.length ? Math.max(...calibratedData.map(d => d.temperature)) : null;
+
+  // Funkcja wyliczająca ile czasu minęło od ostatniego pomiaru
+  const getTimeAgo = (dateStr: string) => {
+    const diffMs = new Date().getTime() - new Date(dateStr).getTime();
+    const diffMins = Math.floor(diffMs / 60000);
+    
+    if (diffMins < 60) return `${diffMins} min temu`;
+    const diffHrs = Math.floor(diffMins / 60);
+    const restMins = diffMins % 60;
+    return `${diffHrs} godz. ${restMins} min temu`;
+  };
+
+  // Logika ostrzeżeń o opóźnieniu
+  const delayMins = last ? Math.floor((new Date().getTime() - new Date(last.created_at).getTime()) / 60000) : 0;
+  const isDelayed = delayMins >= 25; // Ostrzeżenie pomarańczowe od 25 min
+  const isOffline = delayMins >= 60; // Krytyczne czerwone od 60 min
 
   // --- WYKRYWANIE ŁADOWANIA BATERII ---
   let isCharging = false;
@@ -290,12 +300,22 @@ export default function Dashboard() {
           </div>
         </div>
 
-        {isOffline && data.length > 0 && (
-          <div className="bg-red-500/10 border border-red-500/50 text-red-400 p-4 rounded-xl flex items-center gap-3 animate-pulse">
-            <WifiOff className="w-6 h-6" />
+        {/* --- DYNAMICZNY BANER OPÓŹNIENIA / OFFLINE --- */}
+        {isDelayed && last && (
+          <div className={`p-4 rounded-xl flex items-center gap-3 border ${
+            isOffline 
+              ? "bg-red-500/10 border-red-500/50 text-red-400" 
+              : "bg-orange-500/10 border-orange-500/50 text-orange-400"
+          }`}>
+            {isOffline ? <WifiOff className="w-6 h-6 animate-pulse" /> : <Clock className="w-6 h-6 animate-pulse" />}
             <div>
-              <p className="font-bold">Utracono połączenie ze stacją!</p>
-              <p className="text-sm text-red-300">Ostatni pomiar jest starszy niż 30 minut.</p>
+              <p className="font-bold text-base">
+                {isOffline ? "Utracono połączenie ze stacją!" : "Opóźnienie w odczytach ze stacji!"}
+              </p>
+              <p className="text-sm opacity-90 mt-0.5">
+                Ostatni pomiar: <span className="font-semibold">{new Date(last.created_at).toLocaleTimeString("pl-PL", { hour: "2-digit", minute: "2-digit" })}</span> 
+                {" "}({getTimeAgo(last.created_at)})
+              </p>
             </div>
           </div>
         )}
