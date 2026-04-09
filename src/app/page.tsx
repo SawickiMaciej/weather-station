@@ -58,13 +58,24 @@ export default function Dashboard() {
   const [rainRangeDays, setRainRangeDays] = useState(7); 
   const [rainData, setRainData] = useState<Measurement[]>([]);
 
-  // --- 1. POBIERANIE LISTY STACJI ---
+  // --- 1. POBIERANIE LISTY STACJI (Zaktualizowane o obsługę nowej relacji RLS) ---
   useEffect(() => {
     const fetchStations = async () => {
-      const { data: stationsData } = await supabase.from("stations").select("*");
+      // Dzięki nowej polityce RLS (Dostęp do stacji przez tabelę łącznikową), 
+      // Supabase zwróci TYLKO te stacje, do których zalogowany użytkownik ma dostęp w tabeli user_stations.
+      const { data: stationsData, error } = await supabase.from("stations").select("*");
+      
+      if (error) {
+        console.error("Błąd pobierania stacji (sprawdź polityki RLS):", error);
+        return;
+      }
+
       if (stationsData && stationsData.length > 0) {
         setStations(stationsData);
+        // Jeśli nie mamy wybranej stacji (np. przy pierwszym wejściu), wybieramy pierwszą z brzegu
         if (!selectedStationId) setSelectedStationId(stationsData[0].id);
+      } else {
+        console.warn("Brak przypisanych stacji dla tego użytkownika.");
       }
     };
     fetchStations();
@@ -122,7 +133,7 @@ export default function Dashboard() {
         .order("created_at", { ascending: true });
 
       if (!error) {
-        setRainData((data as any) || []);
+        setRainData((data as Measurement[]) || []);
       }
     };
 
@@ -163,7 +174,7 @@ export default function Dashboard() {
         const prevRain = parseFloat(String(prev.extra_data?.rain_intensity || 0));
         const currRain = parseFloat(String(curr.extra_data?.rain_intensity || 0));
 
-        // Bez niepotrzebnego mnożenia
+        // Bez niepotrzebnego mnożenia, dane w bazie są już w mm
         const rainDiff = currRain > prevRain ? (currRain - prevRain) : 0;
 
         if (rainDiff > 0) {
