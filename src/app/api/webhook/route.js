@@ -128,7 +128,7 @@ export async function POST(request) {
                 if (temp <= 2 && temp !== -999) tempWarning = " ❄️ *RYZYKO PRZYMROZKU*";
                 if (temp === -999) tempWarning = " ⚠️ błąd czujnika";
 
-                lines.push(`${statusIcon} *${stationName}*  \\(${stationId}\\)`);
+                lines.push(`${statusIcon} *${stationName}* (${stationId})`);
                 lines.push(`   📡 Status: *${statusLabel}* – ${lastSeen}`);
 
                 if (rec.temperature !== null) {
@@ -177,7 +177,7 @@ async function sendTelegram(token, chatId, text) {
         body: JSON.stringify({
             chat_id: chatId,
             text: text,
-            parse_mode: 'MarkdownV2',
+            parse_mode: 'Markdown',
         })
     });
 }
