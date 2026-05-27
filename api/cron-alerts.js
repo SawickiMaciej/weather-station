@@ -5,11 +5,13 @@ export default async function handler(req, res) {
     const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 
     try {
+        // Pobieramy dane z Twojej prawidłowej tabeli: station_data
         const response = await fetch(`${SUPABASE_URL}/rest/v1/station_data?select=*&order=created_at.desc&limit=50`, {
             headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` }
         });
         const data = await response.json();
 
+        // Grupowanie najnowszych wpisów po station_id
         const stations = {};
         for (const row of data) {
             if (!stations[row.station_id]) stations[row.station_id] = row;
@@ -22,17 +24,17 @@ export default async function handler(req, res) {
             const recordTime = new Date(lastRecord.created_at);
             const diffHours = (now - recordTime) / (1000 * 60 * 60);
 
-            // Dolna sekcja z parametrami
-            const msgFooter = `\n\n📊 *Ostatni odczyt:*\n🔋 Bateria: ${lastRecord.field3}V\n🌡 Temp: ${lastRecord.field1}°C\n💧 Wilgotność: ${lastRecord.field2}%`;
+            // Dolna sekcja z parametrami używająca prawidłowych nazw kolumn
+            const msgFooter = `\n\n📊 *Ostatni odczyt:*\n🔋 Bateria: ${lastRecord.battery_voltage}V\n🌡 Temp: ${lastRecord.temperature}°C\n💧 Wilgotność: ${lastRecord.humidity}%\n📶 Sygnał: ${lastRecord.signal_strength}`;
 
             if (diffHours > 1) {
                 alerts.push(`🔴 *KRYTYCZNA AWARIA* 🔴\n📡 Stacja: *${stationId}*\n⏱ Brak transmisji od ${Math.round(diffHours)} godzin! Prawdopodobny zgon zasilania.` + msgFooter);
             }
-            else if (lastRecord.field3 < 3.55) {
-                alerts.push(`🪫 *ALARM ZASILANIA* 🪫\n📡 Stacja: *${stationId}*\n⚠️ Bateria nie ładuje się (Napięcie: ${lastRecord.field3}V). Solar może być odłączony!` + msgFooter);
+            else if (lastRecord.battery_voltage < 3.55) {
+                alerts.push(`🪫 *ALARM ZASILANIA* 🪫\n📡 Stacja: *${stationId}*\n⚠️ Bateria nie ładuje się (Napięcie: ${lastRecord.battery_voltage}V). Solar może być odłączony!` + msgFooter);
             }
-            else if (lastRecord.field1 == -999) {
-                alerts.push(`🔧 *BŁĄD CZUJNIKÓW* 🔧\n📡 Stacja: *${stationId}*\n❌ Wykryto -999. Możliwe zwarcie I2C lub wypięta wtyczka!` + msgFooter);
+            else if (lastRecord.temperature == -999 || lastRecord.humidity > 100) {
+                alerts.push(`🔧 *BŁĄD CZUJNIKÓW* 🔧\n📡 Stacja: *${stationId}*\n❌ Wykryto anomalię (Zwarcie lub -999).` + msgFooter);
             }
         }
 
