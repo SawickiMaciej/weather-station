@@ -15,7 +15,7 @@ export async function POST(request) {
         if (message.chat.id.toString() !== MY_CHAT_ID) return new Response('OK', { status: 200 });
 
         if (message.text === '/status') {
-            const response = await fetch(`${SUPABASE_URL}/rest/v1/station_data?select=*&order=created_at.desc&limit=50`, {
+            const response = await fetch(`${SUPABASE_URL}/rest/v1/station?select=*&order=created_at.desc&limit=50`, {
                 headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` },
                 cache: 'no-store'
             });
