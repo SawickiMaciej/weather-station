@@ -10,12 +10,14 @@ export async function POST(request) {
         const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
         const MY_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 
-        // Blokada – tylko Twój chat
         if (message.chat.id.toString() !== MY_CHAT_ID) {
             return new Response('OK', { status: 200 });
         }
 
-        if (message.text === '/status') {
+        const text = message.text.trim();
+
+        if (text === '/status' || text === '/status all') {
+            const showAll = text === '/status all';
 
             // 1. Pobierz listę wszystkich stacji
             const stationsRes = await fetch(
@@ -45,26 +47,41 @@ export async function POST(request) {
                 }
             }
 
-            // 3. Buduj wiadomość
+            // 3. Filtruj stacje
             const now = new Date();
+            const sevenDaysAgo = new Date(now - 7 * 24 * 60 * 60 * 1000);
+
+            const filteredStations = stationsList
+                .sort((a, b) => a.id.localeCompare(b.id))
+                .filter(station => {
+                    if (showAll) return true;
+                    const rec = latest[station.id];
+                    if (!rec) return false;
+                    return new Date(rec.created_at) >= sevenDaysAgo;
+                });
+
+            if (filteredStations.length === 0) {
+                await sendTelegram(TELEGRAM_TOKEN, MY_CHAT_ID, "📭 Brak aktywnych stacji w ostatnim tygodniu.\n\nUżyj /status all żeby zobaczyć wszystkie.");
+                return new Response('OK', { status: 200 });
+            }
+
+            // 4. Buduj wiadomość
             const lines = [];
+            const title = showAll ? "🌿 *AgroControl – WSZYSTKIE STACJE*" : "🌿 *AgroControl – STATUS SIECI*";
 
             lines.push("━━━━━━━━━━━━━━━━━━━━");
-            lines.push("🌿 *AgroControl – STATUS SIECI*");
+            lines.push(title);
             lines.push(`🕒 ${formatDate(now)}`);
+            if (!showAll) lines.push(`_(aktywne w ostatnim tygodniu)_`);
             lines.push("━━━━━━━━━━━━━━━━━━━━");
             lines.push("");
 
             let onlineCount = 0;
             let offlineCount = 0;
 
-            // Sortuj alfabetycznie po id
-            const sortedStations = stationsList.sort((a, b) => a.id.localeCompare(b.id));
-
-            for (const station of sortedStations) {
+            for (const station of filteredStations) {
                 const rec = latest[station.id];
 
-                // Brak jakichkolwiek danych
                 if (!rec) {
                     lines.push(`⚫ *${station.name}* (${station.id})`);
                     lines.push(`   📡 Nigdy nie wysłała danych`);
@@ -76,8 +93,6 @@ export async function POST(request) {
                 const recordTime = new Date(rec.created_at);
                 const diffMin = Math.round((now - recordTime) / 60000);
 
-                // Status na podstawie czasu ostatniej transmisji
-                // Stacja wysyła co 15 min – margines do 25 min
                 let statusIcon, statusLabel;
                 if (diffMin <= 25) {
                     statusIcon = "🟢";
@@ -93,7 +108,6 @@ export async function POST(request) {
                     offlineCount++;
                 }
 
-                // Czytelny czas ostatniej transmisji
                 let lastSeen;
                 if (diffMin < 1) {
                     lastSeen = "przed chwilą";
@@ -108,15 +122,9 @@ export async function POST(request) {
                     lastSeen = `${d} dni temu`;
                 }
 
-                // Ikona baterii
                 const bat = parseFloat(rec.battery_voltage);
-                let batIcon;
-                if (bat >= 3.9) batIcon = "🔋";
-                else if (bat >= 3.7) batIcon = "🔋";
-                else if (bat >= 3.55) batIcon = "🪫";
-                else batIcon = "⚠️";
+                let batIcon = bat >= 3.7 ? "🔋" : bat >= 3.55 ? "🪫" : "⚠️";
 
-                // Ostrzeżenie o przymrozku
                 const temp = parseFloat(rec.temperature);
                 let tempWarning = "";
                 if (temp !== -999 && temp <= 2) tempWarning = " ❄️ RYZYKO PRZYMROZKU";
@@ -127,7 +135,6 @@ export async function POST(request) {
                 lines.push(`   🌡 ${temp}°C${tempWarning}  💧 ${rec.humidity}%`);
                 lines.push(`   ${batIcon} ${bat}V  📶 ${rec.signal_strength} dBm`);
 
-                // Extra data (np. deszcz dla AgroRain)
                 if (rec.extra_data) {
                     if (rec.extra_data.rain_intensity !== undefined) {
                         lines.push(`   🌧 Deszcz: ${rec.extra_data.rain_intensity} mm/h`);
@@ -140,9 +147,9 @@ export async function POST(request) {
                 lines.push("");
             }
 
-            // Podsumowanie
             lines.push("━━━━━━━━━━━━━━━━━━━━");
-            lines.push(`📊 Stacji: *${stationsList.length}*  |  🟢 *${onlineCount}* online  |  🔴 *${offlineCount}* offline`);
+            lines.push(`📊 Stacji: *${filteredStations.length}*  |  🟢 *${onlineCount}* online  |  🔴 *${offlineCount}* offline`);
+            if (!showAll) lines.push(`_/status all – pokaż wszystkie stacje_`);
 
             await sendTelegram(TELEGRAM_TOKEN, MY_CHAT_ID, lines.join("\n"));
         }
