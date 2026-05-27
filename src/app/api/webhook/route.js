@@ -21,6 +21,14 @@ export async function POST(request) {
             });
             const data = await response.json();
 
+            console.log("Supabase status:", response.status);
+            console.log("Supabase data:", JSON.stringify(data));
+
+            if (!Array.isArray(data)) {
+                console.error("Supabase nie zwrócił tablicy:", JSON.stringify(data));
+                return new Response('OK', { status: 200 });
+            }
+
             const stations = {};
             for (const row of data) {
                 if (!stations[row.station_id]) stations[row.station_id] = row;
@@ -33,7 +41,7 @@ export async function POST(request) {
                 const recordTime = new Date(lastRecord.created_at);
                 const diffHours = (now - recordTime) / (1000 * 60 * 60);
 
-                let statusIcon = "🟢"; 
+                let statusIcon = "🟢";
                 let statusText = "Online";
 
                 if (diffHours > 1) {
@@ -56,7 +64,6 @@ export async function POST(request) {
         return new Response('OK', { status: 200 });
     } catch (error) {
         console.error("Webhook Error:", error);
-        // Telegram zawsze musi dostać 200 OK, inaczej będzie powtarzał requesty w nieskończoność
         return new Response('OK', { status: 200 });
     }
 }
