@@ -7,7 +7,7 @@ export async function GET(request) {
     const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 
     try {
-        const response = await fetch(`${SUPABASE_URL}/rest/v1/station?select=*&order=created_at.desc&limit=50`, {
+        const response = await fetch(`${SUPABASE_URL}/rest/v1/stations?select=*&order=created_at.desc&limit=50`, {
             headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` },
             cache: 'no-store' // Wymuszamy zawsze świeże dane w Next.js
         });
