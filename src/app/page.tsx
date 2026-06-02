@@ -321,8 +321,10 @@ export default function Dashboard() {
         )}
 
         {/* --- KAFELKI KPI --- */}
+        {/* --- KAFELKI CZUJNIKÓW (tylko te które stacja zbiera) --- */}
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
           
+          {/* Temperatura Powietrza - ZAWSZE */}
           <div className={`p-6 rounded-xl border relative overflow-hidden transition-colors ${isFrostWarning ? 'bg-blue-950/40 border-blue-800' : 'bg-slate-900 border-slate-800'}`}>
             <div className="flex items-center gap-2 mb-4">
               <Thermometer className={`w-5 h-5 ${isFrostWarning ? 'text-blue-400' : 'text-orange-500'}`} />
@@ -337,6 +339,7 @@ export default function Dashboard() {
             </div>
           </div>
 
+          {/* Wilgotność Powietrza - ZAWSZE */}
           <div className={`p-6 rounded-xl border relative overflow-hidden transition-colors ${isFungusWarning ? 'bg-emerald-950/40 border-emerald-800' : 'bg-slate-900 border-slate-800'}`}>
             <div className="flex items-center gap-2 mb-4">
               <Droplets className="w-5 h-5 text-sky-500" />
@@ -350,40 +353,49 @@ export default function Dashboard() {
             </div>
           </div>
 
-          <div className="p-6 rounded-xl border bg-slate-900 border-slate-800">
-            <div className="flex items-center gap-2 mb-4">
-              <Thermometer className="w-5 h-5 text-amber-600" />
-              <span className="text-slate-400 text-xs uppercase tracking-wider font-semibold">Gleba °C</span>
+          {/* Temperatura Gleby - TYLKO JEŚLI STACJA MA */}
+          {last?.extra_data?.soil_temperature && (
+            <div className="p-6 rounded-xl border bg-slate-900 border-slate-800">
+              <div className="flex items-center gap-2 mb-4">
+                <Thermometer className="w-5 h-5 text-amber-600" />
+                <span className="text-slate-400 text-xs uppercase tracking-wider font-semibold">Gleba °C</span>
+              </div>
+              <div className="text-4xl font-bold text-amber-300 mb-2">
+                {`${parseFloat(String(last.extra_data.soil_temperature)).toFixed(1)}°`}
+              </div>
+              <div className="text-xs text-slate-500">Temperatura gruntu</div>
             </div>
-            <div className="text-4xl font-bold text-amber-300 mb-2">
-              {last?.extra_data?.soil_temperature ? `${parseFloat(String(last.extra_data.soil_temperature)).toFixed(1)}°` : "--"}
-            </div>
-            <div className="text-xs text-slate-500">Temperatura gruntu</div>
-          </div>
+          )}
 
-          <div className="p-6 rounded-xl border bg-slate-900 border-slate-800">
-            <div className="flex items-center gap-2 mb-4">
-              <Droplet className="w-5 h-5 text-cyan-500" />
-              <span className="text-slate-400 text-xs uppercase tracking-wider font-semibold">Wilg. Gleby</span>
+          {/* Wilgotność Gleby - TYLKO JEŚLI STACJA MA */}
+          {last?.extra_data?.soil_moisture && (
+            <div className="p-6 rounded-xl border bg-slate-900 border-slate-800">
+              <div className="flex items-center gap-2 mb-4">
+                <Droplet className="w-5 h-5 text-cyan-500" />
+                <span className="text-slate-400 text-xs uppercase tracking-wider font-semibold">Wilg. Gleby</span>
+              </div>
+              <div className="text-4xl font-bold text-cyan-300 mb-2">
+                {`${parseFloat(String(last.extra_data.soil_moisture)).toFixed(0)}%`}
+              </div>
+              <div className="text-xs text-slate-500">Zawartość wody</div>
             </div>
-            <div className="text-4xl font-bold text-cyan-300 mb-2">
-              {last?.extra_data?.soil_moisture ? `${parseFloat(String(last.extra_data.soil_moisture)).toFixed(0)}%` : "--"}
-            </div>
-            <div className="text-xs text-slate-500">Zawartość wody</div>
-          </div>
+          )}
 
-          <div className={`p-6 rounded-xl border ${isHighRain ? 'bg-cyan-950/40 border-cyan-800' : 'bg-slate-900 border-slate-800'}`}>
-            <div className="flex items-center gap-2 mb-4">
-              <Cloud className={`w-5 h-5 ${isHighRain ? 'text-cyan-400' : 'text-slate-400'}`} />
-              <span className="text-slate-400 text-xs uppercase tracking-wider font-semibold">Opad</span>
+          {/* Opad/Deszcz - TYLKO JEŚLI STACJA MA */}
+          {last?.extra_data?.rain_intensity !== undefined && (
+            <div className={`p-6 rounded-xl border ${isHighRain ? 'bg-cyan-950/40 border-cyan-800' : 'bg-slate-900 border-slate-800'}`}>
+              <div className="flex items-center gap-2 mb-4">
+                <Cloud className={`w-5 h-5 ${isHighRain ? 'text-cyan-400' : 'text-slate-400'}`} />
+                <span className="text-slate-400 text-xs uppercase tracking-wider font-semibold">Opad</span>
+              </div>
+              <div className={`text-4xl font-bold mb-2 ${isHighRain ? 'text-cyan-300' : 'text-white'}`}>
+                {totalRain.toFixed(1)}mm
+              </div>
+              <div className="text-xs text-slate-500">
+                W wybranym {rainRangeDays} dni
+              </div>
             </div>
-            <div className={`text-4xl font-bold mb-2 ${isHighRain ? 'text-cyan-300' : 'text-white'}`}>
-              {totalRain.toFixed(1)}mm
-            </div>
-            <div className="text-xs text-slate-500">
-              W wybranym {rainRangeDays} dni
-            </div>
-          </div>
+          )}
         </div>
 
         {/* --- DIAGNOSTYKA URZĄDZENIA --- */}
@@ -467,7 +479,8 @@ export default function Dashboard() {
           </div>
         </div>
 
-        {/* --- WYKRES OPADÓW DOBOWYCH --- */}
+        {/* --- WYKRES OPADÓW DOBOWYCH - TYLKO JEŚLI STACJA MA RAIN GAUGE --- */}
+        {last?.extra_data?.rain_intensity !== undefined && finalRainData.length > 0 && (
         <div className="bg-slate-900 p-5 rounded-xl border border-slate-800">
           <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-6 gap-4">
             <div>
@@ -530,6 +543,7 @@ export default function Dashboard() {
             </div>
           </div>
         </div>
+        )}
 
       </div>
     </div>
