@@ -54,8 +54,7 @@ export default function Dashboard() {
   const [loading, setLoading] = useState(true);
   const [selectedRange, setSelectedRange] = useState(24);
   
-  // Stany dla niezależnego wykresu deszczu
-  const [rainRangeDays, setRainRangeDays] = useState(7); 
+  // Rain gauge data
   const [rainData, setRainData] = useState<Measurement[]>([]);
 
   // --- 1. POBIERANIE LISTY STACJI ---
@@ -114,13 +113,13 @@ export default function Dashboard() {
     return () => { supabase.removeChannel(channel); };
   }, [selectedStationId, selectedRange]);
 
-  // --- 3. ODDZIELNE POBIERANIE DANYCH TYLKO DLA DESZCZU ---
+  // --- 3. RAIN GAUGE DATA FETCH (ZAWSZE 14 DNI) ---
   useEffect(() => {
     if (!selectedStationId) return;
 
     const fetchRain = async () => {
       const startDate = new Date();
-      startDate.setDate(startDate.getDate() - rainRangeDays - 1); 
+      startDate.setDate(startDate.getDate() - 14); // Zawsze 14 dni wstecz
 
       const { data, error } = await supabase
         .from("measurements")
@@ -135,7 +134,7 @@ export default function Dashboard() {
     };
 
     fetchRain();
-  }, [selectedStationId, rainRangeDays]);
+  }, [selectedStationId]);
 
   // --- 4. KALIBRACJA TEMPERATURY I WILGOTNOŚCI ---
   const currentStation = stations.find(s => s.id === selectedStationId);
@@ -150,18 +149,60 @@ export default function Dashboard() {
     humidity: Math.max(0, Math.min(100, d.humidity + humOffset)), 
   }));
 
-  // --- 5. MAGIA DESZCZU - OBLICZANIE OPADÓW I PUSTYCH DNI ---
+  // --- 5. RAIN GAUGE LOGIC (UPROSZCZONE) ---
+  const calculateRainPeriod = (startDate: Date) => {
+    let total = 0;
+    if (rainData.length >= 2) {
+      for (let i = 1; i < rainData.length; i++) {
+        const curr = rainData[i];
+        const currTime = new Date(curr.created_at);
+        
+        // Tylko pomiary od startDate
+        if (currTime < startDate) continue;
+        
+        const prev = rainData[i - 1];
+        const prevRain = parseFloat(String(prev.extra_data?.rain_intensity || 0));
+        const currRain = parseFloat(String(curr.extra_data?.rain_intensity || 0));
+        
+        // Jeśli licznik rośnie, bierz różnicę
+        if (currRain > prevRain) {
+          total += (currRain - prevRain);
+        }
+        // Jeśli currRain < prevRain, najprawdopodobniej reset - ignoruj
+      }
+    }
+    return parseFloat(total.toFixed(2));
+  };
+
+  // Trzy okresy - proste dla sadownika
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const rainToday = calculateRainPeriod(today);
+
+  const weekAgo = new Date();
+  weekAgo.setDate(weekAgo.getDate() - 7);
+  const rainWeek = calculateRainPeriod(weekAgo);
+
+  const monthAgo = new Date();
+  monthAgo.setDate(monthAgo.getDate() - 30);
+  const rainMonth = calculateRainPeriod(monthAgo);
+
+  // Wykres: ostatnie 14 dni (bez przełączania)
   const getRainChartData = () => {
     const rainByDay: Record<string, { sortKey: string; displayDate: string; precipitation: number }> = {};
+    const days = 14;
     
-    for (let i = rainRangeDays - 1; i >= 0; i--) {
+    // Przygotuj wszystkie dni (z zerami)
+    for (let i = days - 1; i >= 0; i--) {
       const d = new Date();
       d.setDate(d.getDate() - i);
-      const sortKey = d.toISOString().split('T')[0]; 
+      d.setHours(0, 0, 0, 0);
+      const sortKey = d.toISOString().split('T')[0];
       const displayKey = d.toLocaleDateString("pl-PL", { day: '2-digit', month: '2-digit' });
       rainByDay[sortKey] = { sortKey, displayDate: displayKey, precipitation: 0 };
     }
 
+    // Oblicz opady dla każdego dnia
     if (rainData.length >= 2) {
       for (let i = 1; i < rainData.length; i++) {
         const prev = rainData[i - 1];
@@ -170,9 +211,9 @@ export default function Dashboard() {
         const prevRain = parseFloat(String(prev.extra_data?.rain_intensity || 0));
         const currRain = parseFloat(String(curr.extra_data?.rain_intensity || 0));
 
-        const rainDiff = currRain > prevRain ? (currRain - prevRain) : 0;
-
-        if (rainDiff > 0) {
+        // Jeśli licznik rośnie, bierz różnicę
+        if (currRain > prevRain) {
+          const rainDiff = currRain - prevRain;
           const dateObj = new Date(curr.created_at);
           const sortKey = dateObj.toISOString().split('T')[0];
           
@@ -180,6 +221,7 @@ export default function Dashboard() {
             rainByDay[sortKey].precipitation += rainDiff;
           }
         }
+        // Ignoruj resety (currRain < prevRain)
       }
     }
 
@@ -190,7 +232,6 @@ export default function Dashboard() {
   };
 
   const finalRainData = getRainChartData();
-  const totalRain = finalRainData.reduce((sum, d) => sum + d.precipitation, 0);
   const maxRainDay = finalRainData.length > 0 ? Math.max(...finalRainData.map(d => d.precipitation)) : 0;
 
   // --- STATYSTYKI OGÓLNE I CZASOWE ---
@@ -251,7 +292,7 @@ export default function Dashboard() {
   // --- ALERTY SADOWNICZE ---
   const isFrostWarning = last && last.temperature <= 2.5;
   const isFungusWarning = last && last.humidity >= 85 && last.temperature >= 10;
-  const isHighRain = totalRain > 20; 
+ const isHighRain = rainToday > 3;  // Alert jeśli dziś >3mm
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-200 p-4 md:p-8 font-sans">
@@ -383,16 +424,17 @@ export default function Dashboard() {
 
           {/* Opad/Deszcz - TYLKO JEŚLI STACJA MA */}
           {last?.extra_data?.rain_intensity !== undefined && (
-            <div className={`p-6 rounded-xl border ${isHighRain ? 'bg-cyan-950/40 border-cyan-800' : 'bg-slate-900 border-slate-800'}`}>
+            <div className="p-6 rounded-xl border bg-slate-900 border-slate-800">
               <div className="flex items-center gap-2 mb-4">
-                <Cloud className={`w-5 h-5 ${isHighRain ? 'text-cyan-400' : 'text-slate-400'}`} />
-                <span className="text-slate-400 text-xs uppercase tracking-wider font-semibold">Opad</span>
+                <Cloud className="w-5 h-5 text-cyan-400" />
+                <span className="text-slate-400 text-xs uppercase tracking-wider font-semibold">Opad Dzisiaj</span>
               </div>
-              <div className={`text-4xl font-bold mb-2 ${isHighRain ? 'text-cyan-300' : 'text-white'}`}>
-                {totalRain.toFixed(1)}mm
+              <div className="text-4xl font-bold text-cyan-300 mb-3">
+                {rainToday.toFixed(1)}mm
               </div>
-              <div className="text-xs text-slate-500">
-                W wybranym {rainRangeDays} dni
+              <div className="text-xs text-slate-400 space-y-1 border-t border-slate-700 pt-3">
+                <div>📊 7 dni: <span className="text-cyan-300 font-medium">{rainWeek.toFixed(1)}mm</span></div>
+                <div>📊 30 dni: <span className="text-cyan-300 font-medium">{rainMonth.toFixed(1)}mm</span></div>
               </div>
             </div>
           )}
@@ -484,25 +526,10 @@ export default function Dashboard() {
         <div className="bg-slate-900 p-5 rounded-xl border border-slate-800">
           <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-6 gap-4">
             <div>
-              <h3 className="text-sm font-medium text-slate-400">Historia Opadów</h3>
+              <h3 className="text-sm font-medium text-slate-400">Historia Opadów (ostatnie 14 dni)</h3>
               <p className="text-xs text-slate-500 mt-1">
-                Łącznie: <span className="font-bold text-cyan-400">{totalRain.toFixed(1)} mm</span> | 
                 Max dziennie: <span className="font-bold text-cyan-400">{maxRainDay.toFixed(1)} mm</span>
               </p>
-            </div>
-            
-            <div className="flex bg-slate-950 border border-slate-800 rounded-lg p-1">
-              {[7, 14, 30].map((days) => (
-                <button
-                  key={days}
-                  onClick={() => setRainRangeDays(days)}
-                  className={`px-3 py-1 text-xs rounded-md transition-all ${
-                    rainRangeDays === days ? "bg-cyan-600 text-white font-medium" : "text-slate-400 hover:text-slate-200"
-                  }`}
-                >
-                  {days} dni
-                </button>
-              ))}
             </div>
           </div>
 
@@ -514,10 +541,10 @@ export default function Dashboard() {
                   dataKey="date" 
                   stroke="#475569" 
                   fontSize={11}
-                  angle={rainRangeDays > 14 ? -90 : -45}
+                  angle={-45}
                   textAnchor="end"
                   height={80}
-                  minTickGap={rainRangeDays > 14 ? 15 : 5} 
+                  minTickGap={5} 
                 />
                 <YAxis stroke="#475569" fontSize={11} label={{ value: 'mm', angle: -90, position: 'insideLeft' }} width={45} />
                 <Tooltip 
